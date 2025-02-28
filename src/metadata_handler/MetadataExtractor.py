@@ -14,13 +14,9 @@ class MetadataExtractor:
         # Display metadata
         for key, value in metadata.items():
             print(f"{key}: {value}")
-
-    def extract_toc_metadata(self, file_path: str):
-        pass
-
-    def extract_ocr_metadata(self, file_path: str):
-        pass
-    
+        
+        return metadata
+  
     def _load_document(self):
         self._document = PdfReader(self._file_path)
         return self._document
@@ -29,3 +25,17 @@ class MetadataExtractor:
         assert os.path.exists(
             document_path
         ), f"Document path did not found: {document_path}"
+
+    def contains_ocr(self):
+        # Check if the document contains any text
+        for page in self._document.pages:
+            if page.extract_text():
+                return True
+        return False
+
+    def contains_toc(self):
+        # Check for bookmarks or specific patterns that indicate a TOC
+        if self._document.outlines:
+            return True
+        # Additional logic to detect TOC patterns can be added here
+        return False
