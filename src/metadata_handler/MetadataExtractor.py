@@ -9,12 +9,7 @@ class MetadataExtractor:
 
     def extract_basic_metadata(self):
         # Get metadata
-        metadata = self._document.metadata
-
-        # Display metadata
-        for key, value in metadata.items():
-            print(f"{key}: {value}")
-        
+        metadata = self._document.metadata        
         return metadata
   
     def _load_document(self):
@@ -37,5 +32,13 @@ class MetadataExtractor:
         # Check for bookmarks or specific patterns that indicate a TOC
         if self._document.outlines:
             return True
-        # Additional logic to detect TOC patterns can be added here
+        # Additional logic to detect TOC patterns
+        # I guess this is maybe good to add directly into the text microservice to check it also the so we does not need to extract text here
+        # toc_keywords = ["Table of Contents", "Chapter", "Section", "Contents"]
+        # for page in self._document.pages:
+        #     text = page.extract_text()
+        #     if text:
+        #         for keyword in toc_keywords:
+        #             if keyword in text:
+        #                 return True
         return False
