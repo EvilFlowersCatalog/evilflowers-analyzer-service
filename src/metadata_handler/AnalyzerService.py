@@ -17,11 +17,11 @@ class AnalyzerService:
 
     def analyze_metadata(self):
         extracted_metadata = self.metadata_extractor.extract_basic_metadata()
-        processed_metadata = self.metadata_processor.process_metadata(extracted_metadata)
+        # processed_metadata = self.metadata_processor.process_metadata(extracted_metadata)
         has_ocr = self.metadata_extractor.contains_ocr()
         has_toc = self.metadata_extractor.contains_toc()
         return {
-            "processed_metadata": processed_metadata,
+            "processed_metadata": extracted_metadata,
             "has_ocr": has_ocr,
             "has_toc": has_toc
         }

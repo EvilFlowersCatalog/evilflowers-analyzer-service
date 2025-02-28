@@ -30,7 +30,7 @@ class MetadataExtractor:
 
     def contains_toc(self):
         # Check for bookmarks or specific patterns that indicate a TOC
-        if self._document.outlines:
+        if self._document.outline:
             return True
         # Additional logic to detect TOC patterns
         # I guess this is maybe good to add directly into the text microservice to check it also the so we does not need to extract text here
