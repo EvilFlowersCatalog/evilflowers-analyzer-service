@@ -16,12 +16,14 @@ class AnalyzerService:
             return self._instance
 
     def analyze_metadata(self):
+        file_type = self.metadata_extractor.extract_file_type()
         extracted_metadata = self.metadata_extractor.extract_basic_metadata()
         # processed_metadata = self.metadata_processor.process_metadata(extracted_metadata)
         has_ocr = self.metadata_extractor.contains_ocr()
-        has_toc = self.metadata_extractor.contains_toc()
+        toc = self.metadata_extractor.extract_toc()
         return {
+            "file_type": file_type, # if not PDF -> pass
             "processed_metadata": extracted_metadata,
-            "has_ocr": has_ocr,
-            "has_toc": has_toc
+            "toc": toc, # TOC in nested dict format if exists, else None
+            "has_ocr": has_ocr
         }
