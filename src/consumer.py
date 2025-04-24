@@ -26,6 +26,13 @@ class MyConsumer(DefaultConsumer):
             "document_path": "/Users/patrikkozlik/Projects/Elvira/evilflowers-analyzer-service/test_data/doc.pdf"
         }
         
+        video_message = {
+            "user_id": 123,
+            "action": "login",
+            "timestamp": "2024-03-20T10:00:00",
+            "video_path": "test_data/video_EN.mp4"
+        }
+        
         text_message = {
             "user_id": 123,
             "action": "login",
@@ -47,7 +54,7 @@ class MyConsumer(DefaultConsumer):
         ai_producer.equation_service_produce(general_message, "equation-service-topic")
 
         # Produce message to video service
-        ai_producer.video_service_produce(general_message, "video-service-topic")
+        ai_producer.video_service_produce(video_message, "video-service-topic")
 
 
 
