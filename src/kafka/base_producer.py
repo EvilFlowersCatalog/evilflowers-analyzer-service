@@ -1,6 +1,6 @@
 from confluent_kafka import Producer as KafkaProducer
 import json
-from src.config.producer_config import conf
+from config.producer_config import conf
 
 cycle = True
 
