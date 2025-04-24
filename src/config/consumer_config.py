@@ -1,10 +1,17 @@
+from os import getenv
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
 consumer_conf = {
-    'bootstrap.servers': '172.28.1.7:9092',
-    'security.protocol': 'SASL_PLAINTEXT',
-    'sasl.mechanism': 'PLAIN',
-    'sasl.username': 'client',
-    'sasl.password': 'misNn2a997J76gLK3FCd',
-    'group.id': 'your_consumer_group',
-    'auto.offset.reset': 'smallest',
+    'bootstrap.servers': getenv('KAFKA_CONSUMER_BOOTSTRAP_SERVERS'),
+    'security.protocol': getenv('KAFKA_CONSUMER_SECURITY_PROTOCOL'),
+    'sasl.mechanism': getenv('KAFKA_CONSUMER_SASL_MECHANISM'),
+    'sasl.username': getenv('KAFKA_CONSUMER_SASL_USERNAME'),
+    'sasl.password': getenv('KAFKA_CONSUMER_SASL_PASSWORD'),
+    'group.id': getenv('KAFKA_CONSUMER_GROUP_ID'),
+    'auto.offset.reset': getenv('KAFKA_CONSUMER_AUTO_OFFSET_RESET'),
 }
-consumer_subscriptions = ["file-details"]
+
+consumer_subscriptions = getenv('KAFKA_CONSUMER_TOPICS', '').split(',')
