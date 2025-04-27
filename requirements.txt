@@ -1,4 +1,9 @@
 python-dotenv==1.0.1
 pypdf
-confluent-kafka
 PyMuPDF
+
+# Elasticsearch
+elasticsearch
+kibana
+git+https://github.com/0Kozlik0/EvilFlowerElasticsearch.git@main#egg=elvira_elasticsearch_client
+confluent_kafka

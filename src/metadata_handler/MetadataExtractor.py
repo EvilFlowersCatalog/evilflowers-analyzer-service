@@ -36,7 +36,6 @@ class MetadataExtractor:
         return False'''
 
     def extract_toc(self):
-        # Check for bookmarks or specific patterns that indicate a TOC
         toc = self._document.get_toc()
         if toc:
             return self._toc_to_dict(toc)

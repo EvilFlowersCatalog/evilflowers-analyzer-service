@@ -2,7 +2,7 @@ from metadata_handler.AnalyzerService import AnalyzerService
 
 
 def main():
-    document_path = "test_data/doc.pdf"
+    document_path = "../test_data/doc3.pdf"
     analyzer_service = AnalyzerService(document_path)
 
     metadata = analyzer_service.analyze_metadata()

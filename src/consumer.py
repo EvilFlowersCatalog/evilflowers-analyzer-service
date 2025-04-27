@@ -6,6 +6,7 @@ from kafka.base_producer import Producer
 from kafka.consumer import DefaultConsumer
 from config.consumer_config import consumer_conf, consumer_subscriptions
 
+from elvira_elasticsearch_client import ElasticsearchClient 
 
 class MyConsumer(DefaultConsumer):
     def msg_process(self, msg):
@@ -17,6 +18,11 @@ class MyConsumer(DefaultConsumer):
         metadata = analyzer_service.analyze_metadata()
         
         print(metadata)
+
+        # Save metadata to Elasticsearch
+        client = ElasticsearchClient()
+        client.save_extracted_metadata_to_elasticsearch(document_id=json_object["document_id"],
+                                                    metadata=metadata)
 
         # Create producer message
         general_message = {
