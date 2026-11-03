@@ -1,9 +1,5 @@
-python-dotenv==1.0.1
-pypdf
-PyMuPDF
-
-# Elasticsearch
-elasticsearch
-kibana
-git+https://github.com/0Kozlik0/EvilFlowerElasticsearch.git@main#egg=elvira_elasticsearch_client
-confluent_kafka
+python-dotenv>=1.0
+celery[redis]>=5.4
+requests>=2.32
+pymupdf>=1.24
+docling>=2.30
