@@ -1,0 +1,16 @@
+.git
+.github
+.idea
+.claude
+.venv
+.env
+.mcp.json
+.pytest_cache
+.ruff_cache
+**/__pycache__
+tests
+data
+models
+test_data
+compose.yml
+*.code-workspace
