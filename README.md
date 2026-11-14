@@ -18,7 +18,8 @@ A run goes like this (`src/evilflowers_analyzer/pipeline.py`):
 
 1. Open the PDF with PyMuPDF. `source` is relative to `STORAGE_PATH`.
 2. `POST /start` with the page count, page sizes, provenance (image tag, Docling version) and the jobs it is about to
-   dispatch: `paragraphs`, `figures`, `equations`, `tables`.
+   dispatch: `paragraphs`, `figures`, `equations`, `tables`. The catalog answers with the run's new `attempt`
+   (EvilFlowersCatalog#140), which every dispatched task carries.
 3. Send the paragraph job to text-service at once; it needs only the text layer.
 4. Run Docling layout over pages in batches of `LAYOUT_BATCH_PAGES`. A batch that fails is logged and skipped.
 5. Send each kind of region to its service. A task goes out even when a kind has no regions, so every declared job
@@ -26,10 +27,20 @@ A run goes like this (`src/evilflowers_analyzer/pipeline.py`):
 
 | Job | Task | Queue | Kwargs |
 |---|---|---|---|
-| paragraphs | `evilflowers_text_worker.paragraphs` | `evilflowers_text_worker` | `run_id, source, output_dir` |
+| paragraphs | `evilflowers_text_worker.paragraphs` | `evilflowers_text_worker` | `run_id, source, output_dir, attempt` |
 | figures | `evilflowers_image.figures` | `evilflowers_image` | `+ regions` |
 | equations | `evilflowers_equation.equations` | `evilflowers_equation` | `+ regions` |
 | tables | `evilflowers_text_worker.tables` | `evilflowers_text_worker` | `+ regions` |
+
+`attempt` is left out when the catalog returns none. A service sends it back as `?attempt=` with its results, and the
+catalog refuses results of a pass that a later `/start` superseded.
+
+**Per batch (`DISPATCH_PER_BATCH=true`, #2).** Instead of one task per kind after the whole layout pass, the analyzer
+sends one task per kind for every layout batch, as soon as the batch is laid out. Each is its own job, named
+`<job>:<first>-<last>` (`equations:0001-0008`). All of them are declared at `/start`, empty batches included, and the
+name goes to the service as the `job` kwarg, which it reports under. A book's equations then spread over every
+equation pod, and a stopped pod loses one batch rather than a book. **Keep it off until the equation, image and text
+services report under `job`.** Until then they report `equations` once, and the batch jobs never close.
 
 `regions` is a list of `{page, seq, bbox, caption}`. `bbox` holds page fractions (`x0, y0, x1, y1`) with the origin at
 the top left, on the original file's 1-based page. `seq` numbers the regions of one kind on one page in reading order.
@@ -44,8 +55,17 @@ A run never waits on the analyzer forever:
   failed. `paragraphs` has already been sent.
 - **A 409** means the catalog no longer accepts the run (it was reset, started or finished). The task stops quietly.
 - **Late acknowledgement.** The task acknowledges late and is requeued if its worker process dies. A redelivered book
-  stops at `/start` with a 409, so nothing is dispatched twice. Redis waits `BROKER_VISIBILITY_TIMEOUT` (2 h) before it
-  redelivers an unacknowledged message.
+  starts the run again: `/start` drops the earlier pass's results and begins a new attempt, so the earlier pass's tasks
+  are refused. Redis waits `BROKER_VISIBILITY_TIMEOUT` (2 h by default; 12 h on dev) before it redelivers a message
+  whose worker vanished without a word.
+- **Scale-in.** The image sets `REMAP_SIGTERM=SIGQUIT`, so the SIGTERM of a stopped pod is a cold shutdown. The worker
+  lets the book run for `WORKER_SOFT_SHUTDOWN_TIMEOUT` (15 min). A typical book (3–10 min) finishes within it. A longer
+  one is cancelled, and its message is back on the queue at once, not after the visibility timeout. Keep the timeout
+  under the pod's termination grace. Without the remap, SIGTERM is a warm shutdown that waits for the book (hours)
+  until the pod's grace runs out. `tests/test_shutdown.py` checks this against a real Redis.
+- **Redelivery cap (#3).** Every delivery of a run's message is counted in Redis (`evilflowers_analyzer:passes:<run_id>`).
+  A new message starts at 1, and a redelivery adds one. After `EXTRACT_MAX_PASSES` (5), for example a book that
+  OOM-kills the worker every time, the analyzer reports job `analyzer` failed instead of starting the run again.
 
 ## Layout
 
@@ -56,7 +76,8 @@ src/
     ├── worker.py              Celery app (`celery -A evilflowers_analyzer.worker worker`), config and routes
     ├── settings.py            typed settings from the environment (pydantic-settings)
     ├── pipeline.py            one run: open → start → dispatch paragraphs → layout → dispatch regions
-    ├── layout.py              the Docling layout pass, region geometry
+    ├── layout.py              the Docling layout pass, batch by batch, region geometry
+    ├── passes.py              deliveries of one run's message, counted in Redis (redelivery cap)
     ├── tasks/                 thin Celery adapter for `evilflowers_analyzer.extract`
     ├── clients/               catalog ingestion API, shared HTTP session
     └── observability/         OpenTelemetry setup, spans, metrics, JSON logs, Pyroscope profiling, Celery signal wiring
@@ -94,6 +115,9 @@ defaults and meaning. The ones a deployment sets:
 - `CATALOG_API_URL` and `CATALOG_API_KEY`, the API key of a catalog user holding `extraction.ingest_extraction`
 - `HF_HOME`, Docling's model cache (`/models` in the image, a volume; the layout model is downloaded on first use)
 - `LAYOUT_BATCH_PAGES` (16) and `LAYOUT_THREADS` (4), which trade memory and CPU against speed
+- `DISPATCH_PER_BATCH` (off), region jobs per layout batch (see above)
+- `WORKER_SOFT_SHUTDOWN_TIMEOUT` (900 s) and `WORKER_ENABLE_SOFT_SHUTDOWN_ON_IDLE` (on), the scale-in grace
+- `EXTRACT_MAX_PASSES` (5), deliveries of one run before it is failed
 - `ANALYZER_QUEUE`, `TEXT_QUEUE`, `IMAGE_QUEUE`, `EQUATION_QUEUE`, only when a queue is renamed. The image's `CMD`
   passes `--queues=evilflowers_analyzer`, so renaming the consumed queue also needs a changed command.
 - `IMAGE_TAG`, built in by CI

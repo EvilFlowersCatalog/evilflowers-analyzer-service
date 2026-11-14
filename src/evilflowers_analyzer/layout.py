@@ -16,7 +16,8 @@ runs the task, never in the parent before the fork.
 import logging
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
+from collections.abc import Iterator
 from typing import Any
 
 from evilflowers_analyzer.observability import annotate, fail, metrics, span
@@ -100,28 +101,44 @@ def _caption(item: Any, kind: str, document: Any) -> str | None:
         return None
 
 
-def find_regions(path: str, page_count: int, settings: Settings | None = None) -> dict[str, list[dict]]:
-    """Every figure, table and equation of the document, by kind, in reading order.
+#: One layout batch: its first and last page (1-based, inclusive) and the regions found on them, by kind.
+Batch = tuple[int, int, dict[str, list[dict]]]
 
-    One bad batch of pages is logged and skipped; it never fails the whole document.
-    Only a failure to load the model raises.
+
+def layout_batches(path: str, page_count: int, settings: Settings | None = None) -> Iterator[Batch]:
+    """The document's figures, tables and equations, one batch of ``LAYOUT_BATCH_PAGES`` pages at a time.
+
+    Every batch is yielded, in page order, as soon as it is converted. A bad batch is
+    logged and yielded with no regions; it never fails the whole document. Only a
+    failure to load the model raises, before the first batch.
     """
     settings = settings or get_settings()
-    regions: dict[str, list[dict]] = {kind: [] for kind in KINDS}
     seq: defaultdict[tuple[str, int], int] = defaultdict(int)
     converter = _get_converter(settings)
     failed = 0
+    found: Counter[str] = Counter()
 
     for first, last in batches(page_count, settings.layout_batch_pages):
+        regions: dict[str, list[dict]] = {kind: [] for kind in KINDS}
         if _convert_batch(converter, path, first, last, regions, seq) == "failed":
             failed += 1
+        found.update({kind: len(items) for kind, items in regions.items()})
+        yield first, last, regions
 
     annotate(
         **{
             "evilflowers.layout.failed_batches": failed,
-            **{f"evilflowers.layout.{k}s": len(v) for k, v in regions.items()},
+            **{f"evilflowers.layout.{kind}s": found[kind] for kind in KINDS},
         }
     )
+
+
+def find_regions(path: str, page_count: int, settings: Settings | None = None) -> dict[str, list[dict]]:
+    """Every figure, table and equation of the document, by kind, in reading order (see ``layout_batches``)."""
+    regions: dict[str, list[dict]] = {kind: [] for kind in KINDS}
+    for _first, _last, batch in layout_batches(path, page_count, settings):
+        for kind in KINDS:
+            regions[kind].extend(batch[kind])
     return regions
 
 

@@ -22,6 +22,7 @@ SPAN_ATTRIBUTES = {
     "pipeline_version": "evilflowers.extraction.pipeline_version",
     "acquisition_id": "evilflowers.acquisition_id",
     "source": "evilflowers.source",
+    "extract_pass": "evilflowers.extraction.pass",
 }
 
 #: Never mutated in place: `bind` sets a new mapping and resets to the old one.

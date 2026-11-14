@@ -25,10 +25,11 @@ def write_pdf(path: Path, sizes: list[tuple[float, float]]) -> Path:
 
 
 class FakeCatalog:
-    """Records what the analyzer posts; `start_error` makes `/start` raise."""
+    """Records what the analyzer posts; `start_error` makes `/start` raise, `attempt` is what it returns."""
 
-    def __init__(self, start_error: Exception | None = None):
+    def __init__(self, start_error: Exception | None = None, attempt: int | None = None):
         self.start_error = start_error
+        self.attempt = attempt
         self.started: list[dict] = []
         self.jobs: list[dict] = []
 
@@ -38,9 +39,10 @@ class FakeCatalog:
         self.started.append(
             {"page_count": page_count, "page_sizes": page_sizes, "jobs": list(jobs), "provenance": provenance}
         )
+        return self.attempt
 
-    def job(self, name, *, failed=False, error=None, provenance=None):
-        self.jobs.append({"name": name, "failed": failed, "error": error})
+    def job(self, name, *, failed=False, error=None, provenance=None, attempt=None):
+        self.jobs.append({"name": name, "failed": failed, "error": error, "attempt": attempt})
 
 
 @pytest.fixture

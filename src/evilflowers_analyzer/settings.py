@@ -27,6 +27,17 @@ class Settings(BaseSettings):
     #: Seconds before Redis redelivers an unacknowledged message. `extract` acknowledges
     #: late, so this must outlast the layout pass of the longest book.
     broker_visibility_timeout: int = 7200
+    #: Seconds a terminated worker lets its task run on before it cancels it and Redis requeues it.
+    #: 15 min lets a typical book (3-10 min) finish; only long ones are cut and requeued. Must stay under
+    #: the pod's termination grace. SIGTERM starts this only with ``REMAP_SIGTERM=SIGQUIT`` (set in the
+    #: image); otherwise it is a warm shutdown that waits for the book.
+    worker_soft_shutdown_timeout: float = Field(900.0, ge=0)
+    #: Also wait out the soft shutdown when the worker is idle, so prefetched messages are requeued.
+    worker_enable_soft_shutdown_on_idle: bool = True
+
+    #: Passes of one run's `extract` before the analyzer gives up and fails the run (#3). A pass is a
+    #: delivery of the same message: the worker died (OOM) or was stopped (scale-in) during the one before.
+    extract_max_passes: int = Field(5, ge=1)
 
     # -- Queues of the services the analyzer dispatches to ------------------------------------
     text_queue: str = "evilflowers_text_worker"
@@ -51,6 +62,10 @@ class Settings(BaseSettings):
     layout_batch_pages: int = Field(16, ge=1)
     #: Docling's CPU threads.
     layout_threads: int = Field(4, ge=1)
+    #: Send figures, equations and tables per layout batch, each its own job (``equations:0001-0008``), as
+    #: soon as the batch is laid out, instead of once per book after the whole pass (#2). Needs services
+    #: that report under the ``job`` kwarg; until they all do, keep it off.
+    dispatch_per_batch: bool = False
 
     # -- Logs ---------------------------------------------------------------------------------
     #: `json` (one object per line, what Loki parses) or `text` (Celery's own format, for a terminal).

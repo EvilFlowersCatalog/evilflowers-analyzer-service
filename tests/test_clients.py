@@ -14,7 +14,9 @@ class Response:
         self.text = body.decode()
 
     def json(self):
-        return {}
+        import json
+
+        return json.loads(self.content or b"{}")
 
     def raise_for_status(self):
         if self.status_code >= 400:
@@ -25,9 +27,11 @@ class FakeHttp:
     def __init__(self, *answers):
         self.answers = list(answers)
         self.calls: list[tuple[str, dict]] = []
+        self.params: list[dict | None] = []
 
-    def post(self, url, json, timeout):
+    def post(self, url, json, timeout, params=None):
         self.calls.append((url, json))
+        self.params.append(params)
         answer = self.answers.pop(0)
         if isinstance(answer, Exception):
             raise answer
@@ -55,6 +59,22 @@ def test_start_posts_to_the_run(settings):
         "jobs": ["paragraphs"],
         "provenance": {"analyzer": {}},
     }
+
+
+def test_start_returns_the_runs_new_attempt(settings):
+    catalog, _http = client(settings, Response(200, b'{"response": {"status": "running", "attempt": 4}}'))
+    assert catalog.start(1, [[1, 1]], [], {}) == 4
+
+    # A catalog that predates EvilFlowersCatalog#140.
+    catalog, _http = client(settings, Response(200, b'{"response": {"status": "running"}}'))
+    assert catalog.start(1, [[1, 1]], [], {}) is None
+
+
+def test_a_job_report_sends_its_attempt_only_when_known(settings):
+    catalog, http = client(settings, Response(200, b""), Response(200, b""))
+    catalog.job("analyzer", failed=True, attempt=4)
+    catalog.job("analyzer", failed=True)
+    assert http.params == [{"attempt": 4}, None]
 
 
 def test_a_failed_job_carries_a_truncated_error(settings):

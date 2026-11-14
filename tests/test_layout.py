@@ -88,3 +88,18 @@ def test_find_regions_numbers_regions_per_page_and_skips_bad_batches(settings, m
         (2, 0, None),
         (2, 1, None),
     ]
+
+
+def test_layout_batches_yields_every_batch_as_it_is_converted_a_bad_one_empty(settings, monkeypatch):
+    converter = FakeConverter()
+    monkeypatch.setattr(layout, "_converter", converter)
+    monkeypatch.setattr(layout, "_kind", lambda item: item.kind)
+    settings = settings.model_copy(update={"layout_batch_pages": 2})
+
+    batches = layout.layout_batches("/book.pdf", 4, settings)
+    first, last, regions = next(batches)
+    # Yielded before the next batch is even converted: the caller can send it at once.
+    assert (first, last, converter.ranges) == (1, 2, [(1, 2)])
+    assert [len(regions[kind]) for kind in layout.KINDS] == [3, 0, 1]
+
+    assert list(batches) == [(3, 4, {"figure": [], "table": [], "equation": []})]

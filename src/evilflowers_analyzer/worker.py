@@ -28,6 +28,10 @@ class CeleryConfig:
         self.broker_connection_retry_on_startup = True
         # `extract` acknowledges late; Redis must not redeliver a book still in its layout pass.
         self.broker_transport_options = {"visibility_timeout": settings.broker_visibility_timeout}
+        # Scale-in: SIGTERM (remapped to SIGQUIT in the image) cancels the book after this grace and its
+        # message goes straight back on the queue, instead of after the visibility timeout.
+        self.worker_soft_shutdown_timeout = settings.worker_soft_shutdown_timeout
+        self.worker_enable_soft_shutdown_on_idle = settings.worker_enable_soft_shutdown_on_idle
 
         self.task_serializer = "json"
         self.result_serializer = "json"

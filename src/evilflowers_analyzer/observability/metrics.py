@@ -71,7 +71,7 @@ CATALOG_RETRIES = Instrument(
 
 
 def record_run(outcome: str, stage: str) -> None:
-    """``outcome``: dispatched, failed or not_running; ``stage``: open, start, layout or dispatch."""
+    """``outcome``: dispatched, failed or not_running; ``stage``: passes, open, start, layout or dispatch."""
     RUN_OUTCOME.add(1, {"outcome": outcome, "stage": stage})
 
 

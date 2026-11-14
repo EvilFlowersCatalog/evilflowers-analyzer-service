@@ -36,12 +36,14 @@ class CatalogClient:
         self.base = f"{self.settings.catalog_api_url.rstrip('/')}/extraction/v1/runs/{run_id}"
         self.http = http or session(self.settings.catalog_api_key)
 
-    def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, path: str, payload: dict[str, Any], params: dict[str, Any] | None = None) -> dict[str, Any]:
         """POST with retries on connection errors and 5xx (exponential backoff); 409 → `RunNotRunning`."""
         attempts = self.settings.catalog_attempts
         for attempt in range(1, attempts + 1):
             try:
-                response = self.http.post(f"{self.base}{path}", json=payload, timeout=self.settings.catalog_timeout)
+                response = self.http.post(
+                    f"{self.base}{path}", json=payload, params=params, timeout=self.settings.catalog_timeout
+                )
             except requests.RequestException:
                 if attempt == attempts:
                     raise
@@ -59,16 +61,28 @@ class CatalogClient:
             time.sleep(2**attempt)
         return {}  # pragma: no cover - the loop always returns or raises
 
-    def start(self, page_count: int, page_sizes: list[list[float]], jobs: Iterable[str], provenance: dict) -> None:
-        self._post(
+    def start(
+        self, page_count: int, page_sizes: list[list[float]], jobs: Iterable[str], provenance: dict
+    ) -> int | None:
+        """Start the run; returns its new `attempt` (EvilFlowersCatalog#140), `None` from a catalog without one."""
+        body = self._post(
             "/start",
             {"page_count": page_count, "page_sizes": page_sizes, "jobs": list(jobs), "provenance": provenance},
         )
+        attempt = (body.get("response") or {}).get("attempt") if isinstance(body, dict) else None
+        return attempt if isinstance(attempt, int) else None
 
     def job(
-        self, name: str, *, failed: bool = False, error: str | None = None, provenance: dict | None = None
+        self,
+        name: str,
+        *,
+        failed: bool = False,
+        error: str | None = None,
+        provenance: dict | None = None,
+        attempt: int | None = None,
     ) -> None:
+        """`attempt`: the one this pass works for; the catalog refuses the report (409) once it is superseded."""
         payload: dict[str, Any] = {"status": "failed" if failed else "done", "provenance": provenance or {}}
         if error:
             payload["error"] = error[:ERROR_LIMIT]
-        self._post(f"/jobs/{name}", payload)
+        self._post(f"/jobs/{name}", payload, None if attempt is None else {"attempt": attempt})

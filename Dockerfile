@@ -41,10 +41,14 @@ COPY --from=build /app/.venv /app/.venv
 COPY src/worker.py ./src/worker.py
 
 ARG IMAGE_TAG=dev
+# REMAP_SIGTERM: k8s stops a pod with SIGTERM, which Celery treats as a warm shutdown (finish the book, hours).
+# As SIGQUIT it is a cold shutdown after WORKER_SOFT_SHUTDOWN_TIMEOUT: the task is cancelled and requeued at once.
+# Billiard reads it when Celery is imported, so it lives here, not in Settings.
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     IMAGE_TAG=${IMAGE_TAG} \
-    HF_HOME=/models
+    HF_HOME=/models \
+    REMAP_SIGTERM=SIGQUIT
 
 # Model weights live in a volume, not in the image (IP-018): Docling's layout model is downloaded on first use.
 VOLUME ["/models"]
