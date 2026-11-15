@@ -44,6 +44,37 @@ def test_bookmarks_win(pdf):
     assert found.entries == [[1, "Introduction", 1], [2, "Background", 2]]
 
 
+class Bookmarked:
+    """A document whose bookmarks are exactly these, as ``get_toc`` returns them."""
+
+    def __init__(self, toc):
+        self.toc = toc
+
+    def get_toc(self, simple=True):
+        return self.toc
+
+
+def test_control_characters_are_stripped_from_bookmark_titles():
+    found = outline.find(Bookmarked([[1, "\x00I\x00n\x00t\x00r\x00o", 1], [2, "Back\x7fground\x1f \t", 2]]))
+
+    assert found.entries == [[1, "Intro", 1], [2, "Background", 2]]
+
+
+def test_a_bookmark_of_only_control_characters_is_dropped():
+    found = outline.find(Bookmarked([[1, "\x00\x00\x01", 1], [1, "Methods", 2]]))
+
+    assert found == outline.Outline("bookmarks", [[1, "Methods", 2]])
+
+
+def test_control_characters_are_stripped_from_detected_headings():
+    spans = [
+        {"text": "\x001\x00.\x001", "size": 12, "flags": 16},
+        {"text": " Entropy\x7f\n", "size": 12, "flags": 16},
+    ]
+
+    assert outline._line(spans, page=1, block=(0, 0)).text == "1.1 Entropy"
+
+
 def test_without_bookmarks_headings_are_found_by_size_and_numbering(pdf):
     page(pdf, [("Chapter 1", 14, True), ("Information", 16, True)], running_head="Information Theory")
     page(pdf, [("1.1 Entropy", 12, True)], running_head="Information Theory 2")

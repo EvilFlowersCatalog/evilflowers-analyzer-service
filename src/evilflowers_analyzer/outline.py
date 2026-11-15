@@ -46,6 +46,8 @@ _CHAPTER = re.compile(r"^(chapter|part|appendix|kapitola|časť|príloha)\s+([0-
 #: A line that is only a heading's number (``1.2.1``) or its ``Chapter 1`` label, set apart from its title.
 _LABEL = re.compile(r"^(\d+(?:\.\d+)*\.?|" + _CHAPTER.pattern[1:] + r")$", re.IGNORECASE)
 _DIGITS = re.compile(r"\d+")
+#: C0 control characters (but tab, newline) and DEL: the catalog refuses ``\x00`` in a ``section`` (#6).
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 _BOLD = 16  # PyMuPDF span flag
 #: Text blocks only: by default "dict" also decodes every image on the page, every page of a scan.
 _TEXT_ONLY = pymupdf.TEXTFLAGS_DICT & ~pymupdf.TEXT_PRESERVE_IMAGES
@@ -58,13 +60,19 @@ class Outline:
     entries: list[list[Any]] = field(default_factory=list)
 
 
+def clean_title(title: str) -> str:
+    """The title without control characters (a UTF-16 title read without its BOM is ``\\x00I\\x00n…``), whitespace
+    collapsed."""
+    return " ".join(_CONTROL.sub("", title).split())
+
+
 def find(document: Any) -> Outline:
     """The bookmarks, else the detected headings; never raises."""
     try:
         bookmarks = [
-            [int(level), title.strip(), int(page)]
+            [int(level), cleaned, int(page)]
             for level, title, page, *_ in document.get_toc(simple=True)
-            if title and title.strip() and page >= 1
+            if title and (cleaned := clean_title(title)) and page >= 1
         ]
         if bookmarks:
             return Outline("bookmarks", bookmarks)
@@ -107,7 +115,7 @@ def _lines(document: Any) -> tuple[list[_Line], Counter[float]]:
 
 def _line(spans: list[dict[str, Any]], *, page: int, block: tuple[int, int]) -> _Line:
     """One line with its largest font size; bold only when every span is."""
-    text = " ".join(" ".join(span["text"].split()) for span in spans).strip()
+    text = clean_title(" ".join(span["text"] for span in spans))
     return _Line(
         page=page,
         text=unicodedata.normalize("NFKC", text),
