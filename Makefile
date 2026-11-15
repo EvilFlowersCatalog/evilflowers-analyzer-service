@@ -1,4 +1,4 @@
-.PHONY: install install-all lint format test check worker image
+.PHONY: install install-all lint format typecheck test coverage check worker image
 
 # Core + dev tools: enough for the tests.
 install:
@@ -16,10 +16,17 @@ format:
 	uv run ruff check --fix
 	uv run ruff format
 
+typecheck:
+	uv run mypy
+
+# tests/test_end_to_end.py needs a Redis (TEST_REDIS_URL, default redis://localhost:6379/15); it skips without one.
 test:
 	uv run pytest
 
-check: lint test
+coverage:
+	uv run pytest --cov --cov-report=term-missing:skip-covered
+
+check: lint typecheck test
 
 # A local worker (needs a reachable REDIS_URL; CATALOG_API_URL/CATALOG_API_KEY to report).
 worker:

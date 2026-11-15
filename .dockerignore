@@ -9,6 +9,9 @@
 .ruff_cache
 **/__pycache__
 tests
+docs
+.mypy_cache
+.coverage
 data
 models
 test_data

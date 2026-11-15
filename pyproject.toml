@@ -6,41 +6,30 @@ readme = "README.md"
 authors = [{ name = "Jakub Dubec", email = "jakub.dubec@stuba.sk" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
-    "celery[redis]>=5.6,<6",
+    # The worker runtime: contract, catalog client, Celery delivery semantics, observability.
+    # https://github.com/EvilFlowersCatalog/evilflowers-worker, pinned to a commit in [tool.uv.sources].
+    "evilflowers-worker",
     "docling>=2.30",
-    "pydantic>=2.12,<3",
-    "pydantic-settings>=2.6,<3",
-    # 2.x hard-depends on onnxruntime and a layout model; the analyzer reads page sizes only.
+    # 2.x hard-depends on onnxruntime and a layout model; the analyzer reads page sizes and text only.
     "pymupdf>=1.26,<2",
-    "python-dotenv>=1.0",
-    "requests>=2.32",
     # Docling's layout model; CPU wheels only (see [tool.uv.sources]).
     "torch>=2.4",
     "torchvision>=0.19",
-    # IP-019: code uses the API only, a no-op without the `otel` extra. One release train with the catalog.
-    "opentelemetry-api==1.45.2",
 ]
 
 [project.optional-dependencies]
-# OTLP/HTTP to the node's Alloy; SDK/exporter 1.x and contrib 0.yb0 move together (as in the catalog).
-otel = [
-    "opentelemetry-sdk==1.45.2",
-    "opentelemetry-exporter-otlp-proto-http==1.45.2",
-    "opentelemetry-instrumentation-celery==0.66b2",
-    "opentelemetry-instrumentation-requests==0.66b2",
-    "opentelemetry-instrumentation-system-metrics==0.66b2",
-]
+# OTLP/HTTP to the node's Alloy (the kit's SDK pins).
+otel = ["evilflowers-worker[otel]"]
 # Pyroscope SDK: Python frames the node's eBPF profiler cannot unwind; on only with PYROSCOPE_SERVER_ADDRESS.
-profiling = [
-    "pyroscope-io==1.4.0",
-    "pyroscope-otel==1.1.0",
-]
+profiling = ["evilflowers-worker[profiling]"]
 
 [dependency-groups]
 # `uv sync` installs the core and this group only.
 dev = [
     "opentelemetry-sdk==1.45.2",
     "pytest>=8.3",
+    "pytest-cov>=6",
+    "mypy>=1.15",
     "ruff>=0.14",
 ]
 
@@ -60,6 +49,8 @@ explicit = true
 [tool.uv.sources]
 torch = [{ index = "pytorch-cpu" }]
 torchvision = [{ index = "pytorch-cpu" }]
+# The shared worker kit (its docs/architecture.md §5). Bump `rev` to take a fix; every service pins its own.
+evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker", rev = "bdc33360c2e3ba51b2bde6ed3afd4d2d62151603" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -75,4 +66,19 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "LOG", "G"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["evilflowers_analyzer"]
+known-first-party = ["evilflowers_analyzer", "evilflowers_worker"]
+
+[tool.mypy]
+python_version = "3.12"
+files = ["src/evilflowers_analyzer"]
+plugins = ["pydantic.mypy"]
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+# Celery, kombu, docling and pyroscope ship no type information.
+ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["evilflowers_analyzer"]
+branch = true

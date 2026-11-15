@@ -20,8 +20,9 @@ from collections import Counter, defaultdict
 from collections.abc import Iterator
 from typing import Any
 
-from evilflowers_analyzer.observability import annotate, fail, metrics, span
+from evilflowers_analyzer import metrics
 from evilflowers_analyzer.settings import Settings, get_settings
+from evilflowers_worker.observability import annotate, fail, span
 
 logger = logging.getLogger(__name__)
 

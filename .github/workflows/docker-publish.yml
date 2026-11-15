@@ -46,6 +46,17 @@ jobs:
     concurrency:
       group: analyzer-test-${{ github.ref }}
       cancel-in-progress: true
+    # tests/test_end_to_end.py runs the production worker against it (one extract through to every job message).
+    # With `CI` set a missing Redis fails it instead of skipping. The kit's own real-broker tests (scale-in, delivery
+    # cap) run in evilflowers-worker.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping" --health-interval 2s --health-timeout 2s --health-retries 15
+    env:
+      TEST_REDIS_URL: redis://localhost:6379/15
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -53,15 +64,17 @@ jobs:
           python-version: "3.12"
           enable-cache: true
       # Core (CPU torch, Docling; no model is downloaded) + the `otel` extra, so the
-      # trace-propagation test runs + the dev group (pyproject.toml).
+      # trace-propagation test runs + the dev group (pyproject.toml). The kit comes from its git repo (uv.lock).
       - name: Install
         run: uv sync --locked --extra otel
       - name: Lint
         run: |
           uv run ruff check
           uv run ruff format --check
+      - name: Type check
+        run: uv run mypy
       - name: Test
-        run: uv run pytest -q
+        run: uv run pytest -q --cov --cov-report=term-missing:skip-covered
 
   build-and-push:
     needs: test

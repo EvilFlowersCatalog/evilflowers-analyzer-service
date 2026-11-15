@@ -6,6 +6,15 @@ The Celery worker that starts every IP-018 extraction run of
 Docling layout pass (CPU, no OCR) and hands each kind of region to the service that enriches it. It writes no files and
 posts no regions itself.
 
+This repository is also the **reference for extraction services**:
+- [`docs/architecture.md`](https://github.com/EvilFlowersCatalog/evilflowers-worker/blob/master/docs/architecture.md)
+  in evilflowers-worker is the model: roles, the message contract, delivery semantics and the observability contract.
+- [evilflowers-worker](https://github.com/EvilFlowersCatalog/evilflowers-worker) is the kit every service builds on:
+  contract, catalog client, leaf-job lifecycle, Celery runtime, scale-in and observability. This service pins it to a
+  commit (`[tool.uv.sources]` in `pyproject.toml`).
+
+The analyzer itself is only its domain code (layout, outline, the coordinator in `pipeline.py`) on top of the kit.
+
 ## Tasks
 
 The task name, queue and argument shape are a contract with the catalog (`tests/test_worker.py` guards it).
@@ -16,8 +25,11 @@ The task name, queue and argument shape are a contract with the catalog (`tests/
 
 A run goes like this (`src/evilflowers_analyzer/pipeline.py`):
 
-1. Open the PDF with PyMuPDF. `source` is relative to `STORAGE_PATH`.
-2. `POST /start` with the page count, page sizes, provenance (image tag, Docling version) and the jobs it is about to
+1. Open the PDF with PyMuPDF. `source` is relative to `STORAGE_PATH`. Read its outline (`outline.py`, #5): the
+   bookmarks, or, for a book without any, the headings detected on the text layer (lines set larger than the body
+   text, or bold and numbered like `1.2.3`, that do not repeat as running heads).
+2. `POST /start` with the page count, page sizes, provenance (image tag, Docling version, `outline_source`:
+   `bookmarks`, `headings`, `none` or `failed`, and `outline_entries`) and the jobs it is about to
    dispatch: `paragraphs`, `figures`, `equations`, `tables`. The catalog answers with the run's new `attempt`
    (EvilFlowersCatalog#140), which every dispatched task carries.
 3. Send the paragraph job to text-service at once; it needs only the text layer.
@@ -27,10 +39,20 @@ A run goes like this (`src/evilflowers_analyzer/pipeline.py`):
 
 | Job | Task | Queue | Kwargs |
 |---|---|---|---|
-| paragraphs | `evilflowers_text_worker.paragraphs` | `evilflowers_text_worker` | `run_id, source, output_dir, attempt` |
+| paragraphs | `evilflowers_text_worker.paragraphs` | `evilflowers.text.paragraphs` | `run_id, source, output_dir, attempt, outline` |
 | figures | `evilflowers_image.figures` | `evilflowers_image` | `+ regions` |
 | equations | `evilflowers_equation.equations` | `evilflowers_equation` | `+ regions` |
-| tables | `evilflowers_text_worker.tables` | `evilflowers_text_worker` | `+ regions` |
+| tables | `evilflowers_text_worker.tables` | `evilflowers.text.tables` | `+ regions` |
+
+The two text jobs have their own queues (#4, evilflowers-text-service#13). Before that, both went to the shared
+`evilflowers_text_worker`. The text worker still consumes that legacy queue by default, so deploy the text image (and
+its k8s args without `--queues=evilflowers_text_worker`, knowledge#48) **before** this analyzer. Drop the legacy queue
+once `redis_key_size{key="evilflowers_text_worker"}` is 0.
+
+`outline` is a list of `[level, title, page]` (1-based page), the shape of PyMuPDF's `get_toc(simple=True)`, so
+text-service can use it wherever it read the bookmarks. When present it is authoritative, and it is `[]` for a book
+with no outline. It is left out when the analyzer could not read the outline (`failed`), so text-service falls back
+to the bookmarks.
 
 `attempt` is left out when the catalog returns none. A service sends it back as `?attempt=` with its results, and the
 catalog refuses results of a pass that a later `/start` superseded.
@@ -56,16 +78,29 @@ A run never waits on the analyzer forever:
 - **A 409** means the catalog no longer accepts the run (it was reset, started or finished). The task stops quietly.
 - **Late acknowledgement.** The task acknowledges late and is requeued if its worker process dies. A redelivered book
   starts the run again: `/start` drops the earlier pass's results and begins a new attempt, so the earlier pass's tasks
-  are refused. Redis waits `BROKER_VISIBILITY_TIMEOUT` (2 h by default; 12 h on dev) before it redelivers a message
-  whose worker vanished without a word.
-- **Scale-in.** The image sets `REMAP_SIGTERM=SIGQUIT`, so the SIGTERM of a stopped pod is a cold shutdown. The worker
-  lets the book run for `WORKER_SOFT_SHUTDOWN_TIMEOUT` (15 min). A typical book (3–10 min) finishes within it. A longer
-  one is cancelled, and its message is back on the queue at once, not after the visibility timeout. Keep the timeout
-  under the pod's termination grace. Without the remap, SIGTERM is a warm shutdown that waits for the book (hours)
-  until the pod's grace runs out. `tests/test_shutdown.py` checks this against a real Redis.
-- **Redelivery cap (#3).** Every delivery of a run's message is counted in Redis (`evilflowers_analyzer:passes:<run_id>`).
-  A new message starts at 1, and a redelivery adds one. After `EXTRACT_MAX_PASSES` (5), for example a book that
-  OOM-kills the worker every time, the analyzer reports job `analyzer` failed instead of starting the run again.
+  are refused. Redis waits `BROKER_VISIBILITY_TIMEOUT` (12 h, the same for every consumer of the db) before it
+  redelivers a message whose worker vanished without a word.
+- **Scale-in** (the kit's `evilflowers_worker.shutdown`). The SIGTERM of a stopped pod is Celery's warm shutdown:
+  the worker takes no new book and lets the one in hand run. If that book is still running after
+  `WORKER_SOFT_SHUTDOWN_TIMEOUT` (15 min), the worker sends itself SIGQUIT (cold shutdown). The book is cancelled, and its message is back on the queue at once, not
+  after the visibility timeout. A typical book (3–10 min) finishes within the grace, is acknowledged, and the worker
+  exits. An idle worker exits at once. Keep the timeout under the pod's termination grace.
+
+  If the cold shutdown cannot stop the book within `WORKER_CANCEL_TIMEOUT` (30 s), the worker puts the message back
+  on the queue itself and exits. On dev the parent's kill of its prefork child was denied (`PermissionError`,
+  errno 13, 2026-11-14), and this fallback covers that. The worker is the container's PID 1, so the child goes with it.
+
+  Don't use Celery's own soft shutdown (`REMAP_SIGTERM=SIGQUIT` with `worker_soft_shutdown_timeout`). It sleeps the
+  whole timeout in the signal handler even after the book is done, then has the pool kill the child before the book's
+  acknowledgement is processed. On dev that kill was denied and the shutdown aborted, so a book that had succeeded at
+  21:02 was restored and redone at 21:14. The worker puts SIGTERM back to a warm shutdown even if `REMAP_SIGTERM`
+  is set. The kit's `tests/test_runtime.py` checks each case against a real Redis, the denied kill included.
+- **Redelivery cap (#3).** Every delivery of the message is counted in Redis
+  (`evilflowers:deliveries:analyzer:<task id>`). A fresh message starts at 1, a redelivery adds one, and a deliberate
+  requeue on scale-in gives its count back. After `EXTRACT_MAX_PASSES` (5), for example a book that OOM-kills the
+  worker every time, the analyzer reports job `analyzer` failed instead of starting the run again.
+- **An invalid message** (a kwarg of the wrong type) is reported as job `analyzer` failed and acknowledged. It is never
+  retried, since the same message would fail the same way.
 
 ## Layout
 
@@ -73,19 +108,18 @@ A run never waits on the analyzer forever:
 src/
 ├── worker.py                  shim for the pre-1.0 start command (`celery --workdir src -A worker`)
 └── evilflowers_analyzer/
-    ├── worker.py              Celery app (`celery -A evilflowers_analyzer.worker worker`), config and routes
-    ├── settings.py            typed settings from the environment (pydantic-settings)
-    ├── pipeline.py            one run: open → start → dispatch paragraphs → layout → dispatch regions
+    ├── worker.py              the Celery app: `runtime.create_app("analyzer", …)`
+    ├── settings.py            `WorkerSettings` + the queues it sends to and the layout pass
+    ├── pipeline.py            the coordinator: open → start → paragraphs → layout → region jobs
     ├── layout.py              the Docling layout pass, batch by batch, region geometry
-    ├── passes.py              deliveries of one run's message, counted in Redis (redelivery cap)
-    ├── tasks/                 thin Celery adapter for `evilflowers_analyzer.extract`
-    ├── clients/               catalog ingestion API, shared HTTP session
-    └── observability/         OpenTelemetry setup, spans, metrics, JSON logs, Pyroscope profiling, Celery signal wiring
+    ├── outline.py             the outline: bookmarks, else headings detected on the text layer
+    ├── metrics.py             the analyzer's own metrics (the standard ones are the kit's)
+    └── tasks/                 `evilflowers_analyzer.extract`: validate the message, count the delivery, run
 ```
 
-`clients/`, `observability/`, `settings.py` and `worker.py` have the same shape as in
-[evilflowers-text-service](https://github.com/EvilFlowersCatalog/evilflowers-text-service) and the other extraction
-workers; keep them in step.
+Shared code is not copied between services any more. A fix to the catalog client, the delivery cap, scale-in or
+telemetry goes into [evilflowers-worker](https://github.com/EvilFlowersCatalog/evilflowers-worker), and every
+service gets it by bumping the pinned commit (`rev` in `[tool.uv.sources]`, then `uv lock`).
 
 ## Development
 
@@ -93,9 +127,15 @@ The project uses [uv](https://docs.astral.sh/uv/) and Python 3.12. torch comes f
 (`[tool.uv.sources]` in `pyproject.toml`), never the CUDA build. The `otel` extra adds the OpenTelemetry SDK, and the
 `profiling` extra adds the Pyroscope SDK.
 
+The worker kit comes from its git repository at the pinned commit. To work on both at once, point the source at a
+local checkout for a while: `evilflowers-worker = { path = "../evilflowers-worker", editable = true }`.
+
 ```bash
-make install        # core + dev tools (ruff, pytest): enough for the tests; no model is downloaded
-make check          # ruff check, ruff format --check, pytest
+make install        # core + dev tools (ruff, mypy, pytest): enough for the tests; no model is downloaded
+make check          # ruff check, ruff format --check, mypy, pytest
+make coverage       # pytest with branch coverage
+# tests/test_end_to_end.py runs the production worker against Redis (TEST_REDIS_URL, default
+# redis://localhost:6379/15); it skips without one locally and fails without one in CI.
 make install-all    # everything the image has (also runs the trace-propagation test)
 make worker         # a local worker (REDIS_URL, CATALOG_API_URL, CATALOG_API_KEY from .env)
 make image          # docker build, tagged evilflowers-analyzer-service:local
@@ -116,10 +156,13 @@ defaults and meaning. The ones a deployment sets:
 - `HF_HOME`, Docling's model cache (`/models` in the image, a volume; the layout model is downloaded on first use)
 - `LAYOUT_BATCH_PAGES` (16) and `LAYOUT_THREADS` (4), which trade memory and CPU against speed
 - `DISPATCH_PER_BATCH` (off), region jobs per layout batch (see above)
-- `WORKER_SOFT_SHUTDOWN_TIMEOUT` (900 s) and `WORKER_ENABLE_SOFT_SHUTDOWN_ON_IDLE` (on), the scale-in grace
+- `WORKER_SOFT_SHUTDOWN_TIMEOUT` (900 s), the scale-in grace, and `WORKER_CANCEL_TIMEOUT` (30 s), how long the
+  cancel may take before the worker requeues the book itself
 - `EXTRACT_MAX_PASSES` (5), deliveries of one run before it is failed
-- `ANALYZER_QUEUE`, `TEXT_QUEUE`, `IMAGE_QUEUE`, `EQUATION_QUEUE`, only when a queue is renamed. The image's `CMD`
-  passes `--queues=evilflowers_analyzer`, so renaming the consumed queue also needs a changed command.
+- `ANALYZER_QUEUE`, `TEXT_TABLES_QUEUE`, `TEXT_PARAGRAPHS_QUEUE`, `IMAGE_QUEUE`, `EQUATION_QUEUE`, only when a queue
+  is renamed. The image's `CMD` passes `--queues=evilflowers_analyzer`, so renaming the consumed queue also needs a
+  changed command. The old `TEXT_QUEUE` is ignored, so a manifest that still sets it cannot send the text jobs back to
+  the legacy queue.
 - `IMAGE_TAG`, built in by CI
 
 ## Observability
@@ -145,7 +188,10 @@ off unless its variables are set, so Compose and local runs need nothing.
   - `analyzer_layout_duration_seconds{outcome}` and `analyzer_layout_pages_total{outcome}`, per layout batch
   - `analyzer_document_pages`
   - `analyzer_regions_total{kind}`
-  - `analyzer_catalog_retries_total`
+  - from the kit, the same in every service:
+    - `analyzer_job_outcome_total{job,outcome}`
+    - `analyzer_catalog_retries_total{route,reason}`, where the label was `path` before the kit
+    - `analyzer_deliveries_capped_total`
   - process CPU and memory
 - **Logs.** Each log line is one JSON object on stdout, carrying `level`, `trace_id`/`span_id`, `task_name`/`task_id`,
   and the task's `run_id`, `acquisition_id` and `source`. `LOG_FORMAT=text` gives Celery's own format for a terminal.

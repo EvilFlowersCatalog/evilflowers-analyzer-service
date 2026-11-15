@@ -16,7 +16,8 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
-# Dependencies first (cached while only the code changes). torch comes from the CPU index (pyproject.toml).
+# Dependencies first (cached while only the code changes). torch comes from the CPU index (pyproject.toml); the
+# worker kit (evilflowers-worker) from its public git repository at the commit uv.lock pins (hence `git` above).
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
@@ -41,14 +42,13 @@ COPY --from=build /app/.venv /app/.venv
 COPY src/worker.py ./src/worker.py
 
 ARG IMAGE_TAG=dev
-# REMAP_SIGTERM: k8s stops a pod with SIGTERM, which Celery treats as a warm shutdown (finish the book, hours).
-# As SIGQUIT it is a cold shutdown after WORKER_SOFT_SHUTDOWN_TIMEOUT: the task is cancelled and requeued at once.
-# Billiard reads it when Celery is imported, so it lives here, not in Settings.
+# No REMAP_SIGTERM: SIGTERM stays Celery's warm shutdown, and the worker itself turns it cold after
+# WORKER_SOFT_SHUTDOWN_TIMEOUT (evilflowers_analyzer.worker.cancel_after_grace). With SIGTERM remapped to SIGQUIT,
+# Celery's soft shutdown sleeps out the whole timeout and then kills the child before acknowledging a finished book.
 ENV PATH=/app/.venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     IMAGE_TAG=${IMAGE_TAG} \
-    HF_HOME=/models \
-    REMAP_SIGTERM=SIGQUIT
+    HF_HOME=/models
 
 # Model weights live in a volume, not in the image (IP-018): Docling's layout model is downloaded on first use.
 VOLUME ["/models"]

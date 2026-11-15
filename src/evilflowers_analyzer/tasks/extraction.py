@@ -2,34 +2,32 @@
 
 ``**_`` keeps the worker compatible with arguments a newer catalog adds.
 
-The task acknowledges late and is rejected (requeued) when its worker process dies,
-and a stopped worker (scale-in, ``REMAP_SIGTERM=SIGQUIT``) cancels it so Redis
-requeues it at once: a book whose layout pass was cut short is delivered again.
-The catalog's ``/start`` then begins a new attempt of the run and drops what the
-earlier pass stored; the tasks of that pass carry its ``attempt`` and are refused
-from then on (EvilFlowersCatalog#140). Each delivery is counted (``passes``), and
-after ``EXTRACT_MAX_PASSES`` the run is failed instead of started again (#3).
+The task acknowledges late and is requeued when its worker process dies (``JOB_TASK_OPTIONS``), and a stopped worker
+(scale-in) cancels it after ``WORKER_SOFT_SHUTDOWN_TIMEOUT`` so Redis requeues it at once: a book whose layout pass
+was cut short is delivered again. The catalog's ``/start`` then begins a new attempt of the run and drops what the
+earlier pass stored; the tasks of that pass carry its ``attempt`` and are refused from then on
+(EvilFlowersCatalog#140). Each delivery is counted (``runtime.delivery``), and after ``EXTRACT_MAX_PASSES`` the run is
+failed instead of started again (#3). A message the analyzer cannot read is reported failed, never retried.
 """
 
-from functools import cache
-from typing import Any
+from typing import Any, cast
 
 from celery import Task, shared_task
+from pydantic import ValidationError
 
-from evilflowers_analyzer import passes
-from evilflowers_analyzer.pipeline import Extraction, Outcome
-from evilflowers_analyzer.settings import get_settings
+from evilflowers_analyzer import metrics
+
+# The app's module, so `create_app` has run in this process: a pool child started by *spawn* (not fork) imports only
+# the tasks module, and `runtime()` would find nothing set up there.
+from evilflowers_analyzer import worker as _worker  # noqa: F401  # isort: skip
+from evilflowers_analyzer.pipeline import ANALYZER_JOB, Extraction, Outcome
+from evilflowers_analyzer.settings import Settings
+from evilflowers_worker.contract import ExtractRequest
+from evilflowers_worker.jobs import report_invalid_message
+from evilflowers_worker.runtime import JOB_TASK_OPTIONS, CeleryPublisher, runtime
 
 
-@cache
-def _redis() -> Any:
-    """The broker's Redis, where passes are counted; one client per worker process."""
-    import redis
-
-    return redis.Redis.from_url(get_settings().redis_url, socket_timeout=5, socket_connect_timeout=5)
-
-
-@shared_task(name="evilflowers_analyzer.extract", bind=True, acks_late=True, reject_on_worker_lost=True)
+@shared_task(name=ExtractRequest.TASK, bind=True, **JOB_TASK_OPTIONS)
 def extract(
     self: Task,
     run_id: str,
@@ -37,26 +35,26 @@ def extract(
     output_dir: str,
     acquisition_id: str | None = None,
     pipeline_version: int | None = None,
-    **_,
+    **_: Any,
 ) -> Outcome:
     """Open the PDF, start the run, send paragraphs to text at once, then the layout regions by kind."""
-
-    def dispatch(task: str, kwargs: dict[str, Any], queue: str) -> None:
-        # Sent from inside the CONSUMER span: the instrumentation adds a PRODUCER span and
-        # puts `traceparent` into the message headers, so the downstream job joins this trace.
-        self.app.send_task(task, kwargs=kwargs, queue=queue)
-
-    redelivered = bool((self.request.delivery_info or {}).get("redelivered"))
+    current = runtime()
+    settings = cast(Settings, current.settings)
+    kwargs = {
+        "run_id": run_id,
+        "source": source,
+        "output_dir": output_dir,
+        "acquisition_id": acquisition_id,
+        "pipeline_version": pipeline_version,
+    }
     try:
-        client = _redis()
-    except Exception:
-        client = None  # `passes.count` counts this pass as the first rather than fail the book
+        request = ExtractRequest.model_validate(kwargs)
+    except ValidationError as error:
+        metrics.record_run("failed", "input")
+        return report_invalid_message(kwargs, error, job=ANALYZER_JOB, settings=settings)
     return Extraction(
-        run_id,
-        source,
-        output_dir,
-        dispatch=dispatch,
-        acquisition_id=acquisition_id,
-        pipeline_version=pipeline_version,
-        passes=passes.count(client, run_id, redelivered),
+        request,
+        publisher=CeleryPublisher(self.app),
+        delivery=current.delivery(self),
+        settings=settings,
     ).run()
