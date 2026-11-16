@@ -528,9 +528,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "docling", specifier = ">=2.30" },
-    { name = "evilflowers-worker", git = "https://github.com/EvilFlowersCatalog/evilflowers-worker?rev=e530f68d2e3d98519008d39b30fee96f28009834" },
-    { name = "evilflowers-worker", extras = ["otel"], marker = "extra == 'otel'", git = "https://github.com/EvilFlowersCatalog/evilflowers-worker?rev=e530f68d2e3d98519008d39b30fee96f28009834" },
-    { name = "evilflowers-worker", extras = ["profiling"], marker = "extra == 'profiling'", git = "https://github.com/EvilFlowersCatalog/evilflowers-worker?rev=e530f68d2e3d98519008d39b30fee96f28009834" },
+    { name = "evilflowers-worker", git = "https://github.com/EvilFlowersCatalog/evilflowers-worker?rev=e563998b9c2f19f0d60cb75e0153fd40f417e84a" },
+    { name = "evilflowers-worker", extras = ["otel"], marker = "extra == 'otel'", git = "https://github.com/EvilFlowersCatalog/evilflowers-worker?rev=e563998b9c2f19f0d60cb75e0153fd40f417e84a" },
+    { name = "evilflowers-worker", extras = ["profiling"], marker = "extra == 'profiling'", git = "https://github.com/EvilFlowersCatalog/evilflowers-worker?rev=e563998b9c2f19f0d60cb75e0153fd40f417e84a" },
     { name = "pillow", specifier = ">=10" },
     { name = "pymupdf", specifier = ">=1.26,<2" },
     { name = "torch", specifier = ">=2.4", index = "https://download.pytorch.org/whl/cpu" },
@@ -550,7 +550,7 @@ dev = [
 [[package]]
 name = "evilflowers-worker"
 version = "0.1.0"
-source = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker?rev=e530f68d2e3d98519008d39b30fee96f28009834#e530f68d2e3d98519008d39b30fee96f28009834" }
+source = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker?rev=e563998b9c2f19f0d60cb75e0153fd40f417e84a#e563998b9c2f19f0d60cb75e0153fd40f417e84a" }
 dependencies = [
     { name = "celery", extra = ["redis"] },
     { name = "opentelemetry-api" },

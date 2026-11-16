@@ -1,0 +1,34 @@
+@startuml sequence-outline-section-heading
+!include elvira.iuml
+' What: without bookmarks, every detected heading candidate is asked of decider (section_heading, 64 per request) before the outline goes to text-service; p and decider_model go to the run's provenance.
+' Source: src/evilflowers_analyzer/outline.py, pipeline.py, settings.py; evilflowers-worker judges/panel.py @ e563998; analyzer#9, evilflowers-worker#10 (2026-11-16)
+title Outline of a book without bookmarks: section_heading asked of decider, 64 candidates per request
+
+participant "analyzer\nextract" as analyzer <<focus>>
+participant "outline.find" as outline
+participant "Panel\n(one per run)" as panel
+participant "decider (Laya)\n/v1/systemone/batch" as decider
+participant "catalog" as catalog
+queue "evilflowers.text.paragraphs" as text
+
+analyzer -> outline : find(document, ask)
+alt PDF has bookmarks
+  outline --> analyzer : Outline("bookmarks"), no question asked
+else no bookmarks
+  outline -> outline : detect candidates (size, numbering,\nrunning heads, MAX_PER_PAGE)
+  outline -[$accent_msg()]> panel : <b>ask_batch(decider, section_heading, states)</b>\nline, 2 lines before/after, page, size/body
+  loop every 64 candidates
+    panel -> decider : POST /v1/systemone/batch (noul, model multilingual)
+    alt answered
+      decider --> panel : results[]: yes/no, p, model
+    else timeout, 5xx, refused, budget spent, breaker open
+      panel -> panel : None for each state of the request
+    end
+  end
+  panel --> outline : Verdict | None per candidate\n(analyzer_judge_total{question, outcome, band})
+  outline -> outline : drop band "hide" (only once JUDGE_THRESHOLDS has section_heading);\nNone keeps the candidate; levels from the kept ones
+  outline --> analyzer : Outline("headings", entries, decisions)
+end
+analyzer -> catalog : POST /start {provenance.analyzer:\noutline_source, outline_entries, outline_decisions}
+analyzer -> text : ParagraphsJob(outline: [level, title, page])
+@enduml

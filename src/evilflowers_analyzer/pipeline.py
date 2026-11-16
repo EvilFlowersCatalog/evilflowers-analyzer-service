@@ -48,6 +48,7 @@ from evilflowers_worker.contract import (
     batch_job,
 )
 from evilflowers_worker.deliveries import capped
+from evilflowers_worker.judges import Judges
 from evilflowers_worker.observability import annotate, bind, fail, span
 from evilflowers_worker.observability import metrics as standard_metrics
 from evilflowers_worker.runtime import Publisher
@@ -124,8 +125,11 @@ class Extraction:
         settings: Settings | None = None,
         catalog: CatalogClient | None = None,
         layout_batches: LayoutBatches | None = None,
+        judges: Judges | None = None,
     ):
         self.settings = settings or get_settings()
+        #: The task passes the process's (``get_judges``), so a breaker outlives the run.
+        self.judges = judges or Judges.from_settings(self.settings)
         self.request = request
         self.publisher = publisher
         self.delivery = delivery
@@ -301,11 +305,16 @@ class Extraction:
         """The page sizes; also reads the outline (``self.outline``), which never fails the run."""
         with span("analyzer.pdf.open"), pymupdf.open(self.path) as document:
             sizes = [[round(page.rect.width, 2), round(page.rect.height, 2)] for page in document]
-            self.outline = outline.find(document)
+            # One panel per run holds the run's judge budget; decider is asked only about detected headings (#9).
+            panel = self.judges.panel()
+            self.outline = outline.find(
+                document, lambda states: panel.ask_batch(self.judges.decider, outline.SECTION_HEADING, states)
+            )
             annotate(
                 **{
                     "evilflowers.outline.source": self.outline.source,
                     "evilflowers.outline.entries": len(self.outline.entries),
+                    "evilflowers.outline.decisions": len(self.outline.decisions),
                 }
             )
         metrics.PAGES.record(len(sizes))
@@ -320,6 +329,8 @@ class Extraction:
                 # `none` is a book without an outline, `failed` one the analyzer could not read (#5).
                 "outline_source": self.outline.source,
                 "outline_entries": len(self.outline.entries),
+                # The decider's verdict on each detected heading (#9): p, decision, decider_model; dropped ones too.
+                **({"outline_decisions": self.outline.decisions} if self.outline.decisions else {}),
             }
         }
 

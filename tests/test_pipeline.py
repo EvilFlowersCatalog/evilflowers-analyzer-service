@@ -150,6 +150,118 @@ def test_the_outline_goes_to_paragraphs_and_its_source_to_the_provenance(setting
     assert catalog.started[0]["provenance"]["analyzer"]["outline_entries"] == 2
 
 
+class DeciderHttp:
+    """The HTTP session under the kit's ``DeciderClient``: "no" for a line starting ``Figure``, else "yes"."""
+
+    def __init__(self):
+        self.requests: list[tuple[str, dict]] = []
+
+    def post(self, url, json=None, timeout=None):
+        self.requests.append((url, json))
+        results = [
+            {"answers": {"section_heading": {"noul": 0.02 if state["line"].startswith("Figure") else 0.95}}}
+            for state in json["states"]
+        ]
+        body = {"model": "laya-multilingual", "results": results}
+        return SimpleNamespace(status_code=200, ok=True, json=lambda: body, text="")
+
+
+def letters(index: int) -> str:
+    """``1`` → ``a``, ``27`` → ``aa``: distinct titles that digits alone would not make (running-head check)."""
+    name = ""
+    while index:
+        index, rest = divmod(index - 1, 26)
+        name = chr(ord("a") + rest) + name
+    return name
+
+
+def headings_pdf(settings, count: int):
+    """No bookmarks; one heading per page set larger than the body, every third a figure label set like one."""
+    path = settings.storage_path / "catalogs/c/e/book.pdf"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with pymupdf.open() as pdf:
+        for index in range(1, count + 1):
+            page = pdf.new_page(width=420, height=600)
+            kind = "Figure" if index % 3 == 0 else "Section"
+            title = f"{kind} {letters(index)}"
+            page.insert_text((40, 80), title, fontsize=14, fontname="hebo")
+            for row in range(20):
+                page.insert_text((40, 110 + row * 14), "Entropy measures the uncertainty of a variable.", fontsize=10)
+        pdf.save(path)
+
+
+def judged_run(settings, catalog, **judge_settings):
+    from evilflowers_analyzer.settings import Settings
+    from evilflowers_worker.judges import Judges
+
+    settings = Settings(
+        _env_file=None, storage_path=settings.storage_path, catalog_attempts=2, image_tag="test",
+        judges_enabled=True, decider_url="http://decider", decider_revision="r1", **judge_settings,
+    )  # fmt: skip
+    judges = Judges.from_settings(settings)
+    http = DeciderHttp()
+    judges.decider.http = http
+    publisher = RecordingPublisher()
+    request = ExtractRequest(run_id="run-1", source="catalogs/c/e/book.pdf", output_dir="catalogs/c/e/extraction/a/v2")
+    Extraction(
+        request, publisher=publisher, settings=settings, catalog=catalog, layout_batches=one_batch, judges=judges
+    ).run()
+    return http, publisher.sent, catalog.started[0]["provenance"]["analyzer"]
+
+
+def test_detected_headings_are_asked_of_decider_64_per_request(settings, catalog):
+    headings_pdf(settings, 130)
+
+    http, sent, provenance = judged_run(settings, catalog)
+
+    assert [(url, len(body["states"])) for url, body in http.requests] == [
+        ("http://decider/v1/systemone/batch", 64),
+        ("http://decider/v1/systemone/batch", 64),
+        ("http://decider/v1/systemone/batch", 2),
+    ]
+    assert http.requests[0][1]["model"] == "multilingual"
+    assert set(http.requests[0][1]["questions"]) == {"section_heading"}
+    # No thresholds yet (knowledge#65): every candidate goes to text-service, its verdict to the provenance.
+    assert len(sent[0][1]["outline"]) == 130
+    assert provenance["outline_entries"] == 130
+    assert len(provenance["outline_decisions"]) == 130
+    assert provenance["outline_decisions"][2] == {
+        "page": 3,
+        "title": "Figure c",
+        "decision": "no",
+        "p": 0.98,
+        "decider_model": "laya-multilingual@r1",
+    }
+
+
+def test_with_thresholds_rejected_headings_leave_the_outline(settings, catalog):
+    headings_pdf(settings, 6)
+
+    _http, sent, provenance = judged_run(
+        settings, catalog, judge_thresholds={"section_heading": {"keep": 0.8, "hide": 0.9}}
+    )
+
+    assert [title for _level, title, _page in sent[0][1]["outline"]] == [
+        "Section a",
+        "Section b",
+        "Section d",
+        "Section e",
+    ]
+    assert [d["band"] for d in provenance["outline_decisions"]] == ["keep", "keep", "hide", "keep", "keep", "hide"]
+
+
+def test_a_book_with_bookmarks_asks_decider_nothing(settings, catalog, pdf):
+    with pymupdf.open(pdf) as document:
+        document.set_toc([[1, "Entropy", 1]])
+        document.saveIncr()
+
+    http, sent, provenance = judged_run(settings, catalog)
+
+    assert http.requests == []
+    assert sent[0][1]["outline"] == [[1, "Entropy", 1]]
+    assert "outline_decisions" not in provenance
+
+
 def test_layout_receives_the_absolute_path_and_page_count(settings, catalog, pdf):
     calls = []
 

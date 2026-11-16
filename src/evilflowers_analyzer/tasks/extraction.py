@@ -25,7 +25,7 @@ from evilflowers_analyzer import metrics
 # the tasks module, and `runtime()` would find nothing set up there.
 from evilflowers_analyzer import worker as _worker  # noqa: F401  # isort: skip
 from evilflowers_analyzer.pipeline import ANALYZER_JOB, Extraction, Outcome
-from evilflowers_analyzer.settings import Settings
+from evilflowers_analyzer.settings import Settings, get_judges
 from evilflowers_worker.contract import ExtractRequest
 from evilflowers_worker.jobs import report_invalid_message
 from evilflowers_worker.runtime import JOB_TASK_OPTIONS, CeleryPublisher, runtime
@@ -69,4 +69,5 @@ def extract(
         publisher=CeleryPublisher(self.app),
         delivery=current.delivery(self),
         settings=settings,
+        judges=get_judges(),
     ).run()

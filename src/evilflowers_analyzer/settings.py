@@ -11,10 +11,14 @@ from functools import lru_cache
 
 from pydantic import AliasChoices, Field
 
+from evilflowers_worker.judges import Judges, JudgeSettings
 from evilflowers_worker.settings import WorkerSettings
 
 
-class Settings(WorkerSettings):
+class Settings(WorkerSettings, JudgeSettings):
+    """``JudgeSettings`` (``DECIDER_ENABLED``, ``DECIDER_URL``, ``JUDGE_*``): the decider asked about detected headings
+    (#9, ``outline.SECTION_HEADING``). Off or without ``DECIDER_URL``, the outline is detected as before."""
+
     # -- What it consumes -------------------------------------------------------------------------------------------
     #: The queue of `evilflowers_analyzer.extract`.
     queue: str = Field("evilflowers_analyzer", validation_alias=AliasChoices("ANALYZER_QUEUE", "QUEUE"))
@@ -57,3 +61,9 @@ class Settings(WorkerSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+@lru_cache
+def get_judges() -> Judges:
+    """The process's judge clients: their circuit breakers outlive one run."""
+    return Judges.from_settings(get_settings())

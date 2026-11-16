@@ -52,7 +52,7 @@ explicit = true
 torch = [{ index = "pytorch-cpu" }]
 torchvision = [{ index = "pytorch-cpu" }]
 # The shared worker kit (its docs/architecture.md §5). Bump `rev` to take a fix; every service pins its own.
-evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker", rev = "e530f68d2e3d98519008d39b30fee96f28009834" }
+evilflowers-worker = { git = "https://github.com/EvilFlowersCatalog/evilflowers-worker", rev = "e563998b9c2f19f0d60cb75e0153fd40f417e84a" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

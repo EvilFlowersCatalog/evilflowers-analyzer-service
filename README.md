@@ -39,9 +39,11 @@ A run goes like this (`src/evilflowers_analyzer/pipeline.py`):
 
 1. Open the PDF with PyMuPDF. `source` is relative to `STORAGE_PATH`. Read its outline (`outline.py`, #5): the
    bookmarks, or, for a book without any, the headings detected on the text layer (lines set larger than the body
-   text, or bold and numbered like `1.2.3`, that do not repeat as running heads).
+   text, or bold and numbered like `1.2.3`, that do not repeat as running heads). Each detected heading is asked of
+   `decider` (#9, below); a book with bookmarks is never asked.
 2. `POST /start` with the page count, page sizes, provenance (image tag, Docling version, `outline_source`:
-   `bookmarks`, `headings`, `none` or `failed`, and `outline_entries`) and the jobs it is about to
+   `bookmarks`, `headings`, `none` or `failed`, `outline_entries`, and `outline_decisions` when the decider answered)
+   and the jobs it is about to
    dispatch: `paragraphs`, `figures`, `equations`, `tables`. The catalog answers with the run's new `attempt`
    (EvilFlowersCatalog#140), which every dispatched task carries.
 3. Send the paragraph job to text-service at once; it needs only the text layer.
@@ -65,6 +67,20 @@ once `redis_key_size{key="evilflowers_text_worker"}` is 0.
 text-service can use it wherever it read the bookmarks. When present it is authoritative, and it is `[]` for a book
 with no outline. It is left out when the analyzer could not read the outline (`failed`), so text-service falls back
 to the bookmarks.
+
+**Detected headings are judged (#9).** Layout-based detection takes a bold first line of a list, a figure label or a
+table header for a heading now and then. For a book without bookmarks, every candidate is asked of `decider` (Laya,
+text) through the kit's `Panel.ask_batch`, 64 per request ([sequence](docs/diagrams/sequence-outline-section-heading.svg)).
+The question is `section_heading` (`outline.SECTION_HEADING`). The state holds the line, the two lines before and after
+it, its page and its font size relative to the body text.
+
+- **Nothing is dropped yet.** A candidate leaves the outline only when its verdict is banded `hide`, which needs
+  thresholds for `section_heading` in `JUDGE_THRESHOLDS` (knowledge#65). Until then every candidate is sent.
+- **No answer keeps the candidate.** This covers decider being off, unreachable or over the run's budget, and the
+  outline is then as before.
+- **Every verdict goes to the provenance**, dropped candidates included, as
+  `outline_decisions: [{page, title, decision, p, decider_model, band?}]`. The `outline` sent to text-service keeps its
+  `[level, title, page]` shape.
 
 `attempt` is left out when the catalog returns none. A service sends it back as `?attempt=` with its results, and the
 catalog refuses results of a pass that a later `/start` superseded.
@@ -121,10 +137,10 @@ src/
 ├── worker.py                  shim for the pre-1.0 start command (`celery --workdir src -A worker`)
 └── evilflowers_analyzer/
     ├── worker.py              the Celery app: `runtime.create_app("analyzer", …)`
-    ├── settings.py            `WorkerSettings` + the queues it sends to and the layout pass
+    ├── settings.py            `WorkerSettings` + `JudgeSettings` + the queues it sends to and the layout pass
     ├── pipeline.py            the coordinator: open → start → paragraphs → layout → region jobs
     ├── layout.py              the Docling layout pass, batch by batch, region geometry
-    ├── outline.py             the outline: bookmarks, else headings detected on the text layer
+    ├── outline.py             the outline: bookmarks, else detected headings, each asked of decider
     ├── metrics.py             the analyzer's own metrics (the standard ones are the kit's)
     └── tasks/                 `evilflowers_analyzer.extract`: validate the message, count the delivery, run
 ```
@@ -177,6 +193,10 @@ defaults and meaning. The ones a deployment sets:
 - `ANALYZER_STANDALONE` (off): consume `evilflowers_analyzer.standalone.interactive` and
   `evilflowers_analyzer.standalone` instead of `ANALYZER_QUEUE` (the digitalizer's Deployment, #8). Its interactive
   replica passes `-Q evilflowers_analyzer.standalone.interactive`. Such a Deployment needs no `CATALOG_API_*`.
+- `DECIDER_ENABLED` (off), `DECIDER_URL`, `DECIDER_MODEL` (`multilingual`), `DECIDER_REVISION`, `DECIDER_TIMEOUT`
+  (60 s per request of up to 64 candidates), `JUDGE_THRESHOLDS`, `JUDGE_BUDGET_CALLS` / `JUDGE_BUDGET_SECONDS` (per
+  run) and `JUDGE_BREAKER_*`: the decider asked about detected headings (#9, the kit's `JudgeSettings`). Off or without
+  `DECIDER_URL`, the outline is detected as before. knowledge#77 sets them in the cluster.
 - `IMAGE_TAG`, built in by CI
 
 ## Observability
@@ -206,6 +226,9 @@ off unless its variables are set, so Compose and local runs need nothing.
     - `analyzer_job_outcome_total{job,outcome}`
     - `analyzer_catalog_retries_total{route,reason}`, where the label was `path` before the kit
     - `analyzer_deliveries_capped_total`
+    - `analyzer_judge_total{question="section_heading",outcome,band}`, one per detected heading (#9). `outcome` is
+      `judged`, `disabled`, `budget`, `open`, `unreachable`, `refused` or `invalid`. Next to it,
+      `analyzer_judge_seconds{question,outcome,batch="true"}`, one per request
   - process CPU and memory
 - **Logs.** Each log line is one JSON object on stdout, carrying `level`, `trace_id`/`span_id`, `task_name`/`task_id`,
   and the task's `run_id`, `acquisition_id` and `source`. `LOG_FORMAT=text` gives Celery's own format for a terminal.
