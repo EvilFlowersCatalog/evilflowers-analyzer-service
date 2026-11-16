@@ -25,6 +25,15 @@ class Settings(WorkerSettings):
     #: the same message: the worker died (OOM) or was stopped during the one before.
     max_deliveries: int = Field(5, ge=0, validation_alias=AliasChoices("EXTRACT_MAX_PASSES", "MAX_DELIVERIES"))
 
+    # -- Standalone (#8): the books digitalizer's layout task, no catalog -------------------------------------------
+    #: Consume the standalone queues instead of ``ANALYZER_QUEUE``: the digitalizer's own Deployment of the same
+    #: image (Redis db 8 through ``REDIS_URL``; it needs no ``CATALOG_API_KEY``).
+    standalone: bool = Field(False, validation_alias=AliasChoices("ANALYZER_STANDALONE", "STANDALONE"))
+    #: Bulk jobs, up to 32 leaves each.
+    standalone_queue: str = "evilflowers_analyzer.standalone"
+    #: One leaf an operator is waiting for.
+    standalone_interactive_queue: str = "evilflowers_analyzer.standalone.interactive"
+
     # -- Queues of the services the analyzer sends jobs to ------------------------------------------------------------
     #: Each text job has its own queue (#4, evilflowers-text-service#13). The old shared ``TEXT_QUEUE`` is
     #: deliberately not read: a manifest still setting it to ``evilflowers_text_worker`` would silently keep both on

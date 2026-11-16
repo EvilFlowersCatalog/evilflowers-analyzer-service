@@ -11,14 +11,21 @@ and equation-service.
 
 Docling (and torch with it) is imported on first use, in the prefork child that
 runs the task, never in the parent before the fork.
+
+The pages come from a ``PageSource``: a PDF (the catalog's ``extract``), or page
+images (the books digitalizer's ``standalone.layout``, #8). Both go through the
+one converter, so the layout model is loaded once per process. Without OCR and
+without a text layer, Docling keeps only pictures, tables and formulas on an
+image: text-like regions (and so captions) need text cells.
 """
 
 import logging
 import threading
 import time
 from collections import Counter, defaultdict
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass
+from typing import Any, Protocol
 
 from evilflowers_analyzer import metrics
 from evilflowers_analyzer.settings import Settings, get_settings
@@ -27,6 +34,74 @@ from evilflowers_worker.observability import annotate, fail, span
 logger = logging.getLogger(__name__)
 
 KINDS = ("figure", "table", "equation")
+#: Kinds (or Docling labels) that carry a caption.
+CAPTIONED = frozenset({"figure", "table", "picture", "chart"})
+
+#: The kind of a Docling item, or ``None`` to skip it.
+Classify = Callable[[Any], str | None]
+
+
+class PageSource(Protocol):
+    """Where a layout pass reads its pages: 1-based pages, converted batch by batch."""
+
+    @property
+    def page_count(self) -> int: ...
+
+    def batches(self, size: int) -> list[tuple[int, int]]:
+        """1-based inclusive page ranges, each converted by one Docling call."""
+        ...
+
+    def convert(self, converter: Any, first: int, last: int) -> Any:
+        """Docling's conversion result of pages ``first``-``last``."""
+        ...
+
+    def page(self, first: int, page_no: int) -> int:
+        """The source's page of ``page_no`` in the result of the batch that starts at ``first``."""
+        ...
+
+
+@dataclass(frozen=True)
+class PdfSource:
+    """A PDF, ``LAYOUT_BATCH_PAGES`` pages per conversion."""
+
+    path: str
+    page_count: int
+
+    def batches(self, size: int) -> list[tuple[int, int]]:
+        return batches(self.page_count, size)
+
+    def convert(self, converter: Any, first: int, last: int) -> Any:
+        return converter.convert(self.path, page_range=(first, last), raises_on_error=False)
+
+    def page(self, first: int, page_no: int) -> int:
+        return page_no
+
+    def __str__(self) -> str:
+        return self.path
+
+
+@dataclass(frozen=True)
+class ImageSource:
+    """Page images in page order, one conversion each (Docling reads one image per document)."""
+
+    images: Sequence[str]
+
+    @property
+    def page_count(self) -> int:
+        return len(self.images)
+
+    def batches(self, size: int) -> list[tuple[int, int]]:
+        return [(page, page) for page in range(1, self.page_count + 1)]
+
+    def convert(self, converter: Any, first: int, last: int) -> Any:
+        return converter.convert(self.images[first - 1], raises_on_error=False)
+
+    def page(self, first: int, page_no: int) -> int:
+        return first + page_no - 1
+
+    def __str__(self) -> str:
+        return f"{self.page_count} page images"
+
 
 _lock = threading.Lock()
 _converter: Any = None
@@ -49,7 +124,7 @@ def _build_converter(threads: int) -> Any:
         from docling.datamodel.pipeline_options import AcceleratorOptions
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.pipeline_options import PdfPipelineOptions
-    from docling.document_converter import DocumentConverter, PdfFormatOption
+    from docling.document_converter import DocumentConverter, ImageFormatOption, PdfFormatOption
 
     options = PdfPipelineOptions()
     options.do_ocr = False
@@ -58,7 +133,14 @@ def _build_converter(threads: int) -> Any:
     options.generate_page_images = False
     options.generate_picture_images = False
     options.accelerator_options = AcceleratorOptions(num_threads=threads, device="cpu")
-    return DocumentConverter(format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=options)})
+    # The same options for both: Docling caches its pipeline by class and options, so PDFs and page images (#8)
+    # share one pipeline and one layout model in memory.
+    return DocumentConverter(
+        format_options={
+            InputFormat.PDF: PdfFormatOption(pipeline_options=options),
+            InputFormat.IMAGE: ImageFormatOption(pipeline_options=options),
+        }
+    )
 
 
 def fractions(left: float, top: float, right: float, bottom: float, width: float, height: float) -> dict[str, float]:
@@ -93,8 +175,17 @@ def _kind(item: Any) -> str | None:
     return None
 
 
+def label(item: Any) -> str | None:
+    """Docling's own label of a content item (``picture``, ``table``, ``formula``, ``text`` …); groups are skipped."""
+    from docling_core.types.doc import DocItem
+
+    if not isinstance(item, DocItem):
+        return None
+    return str(getattr(item.label, "value", item.label))
+
+
 def _caption(item: Any, kind: str, document: Any) -> str | None:
-    if kind not in ("figure", "table"):
+    if kind not in CAPTIONED:
         return None
     try:
         return item.caption_text(document) or None
@@ -106,38 +197,54 @@ def _caption(item: Any, kind: str, document: Any) -> str | None:
 Batch = tuple[int, int, dict[str, list[dict]]]
 
 
-def layout_batches(path: str, page_count: int, settings: Settings | None = None) -> Iterator[Batch]:
-    """The document's figures, tables and equations, one batch of ``LAYOUT_BATCH_PAGES`` pages at a time.
+def layout_batches(
+    source: PageSource,
+    settings: Settings | None = None,
+    *,
+    classify: Classify | None = None,
+    kinds: Sequence[str] = KINDS,
+    on_failed: Callable[[int, int], None] | None = None,
+) -> Iterator[Batch]:
+    """The source's regions by kind, one batch of pages at a time (``LAYOUT_BATCH_PAGES`` for a PDF).
 
     Every batch is yielded, in page order, as soon as it is converted. A bad batch is
-    logged and yielded with no regions; it never fails the whole document. Only a
-    failure to load the model raises, before the first batch.
+    logged and yielded with no regions (and passed to ``on_failed``); it never fails the
+    whole document. Only a failure to load the model raises, before the first batch.
+
+    ``classify`` names the kind of each Docling item (default: the catalog's ``figure`` /
+    ``table`` / ``equation``); ``kinds`` are the keys every batch carries, even when empty,
+    and with ``()`` a batch carries only the kinds it found (Docling labels, #8).
     """
     settings = settings or get_settings()
+    classify = classify or _kind
     seq: defaultdict[tuple[str, int], int] = defaultdict(int)
     converter = _get_converter(settings)
     failed = 0
     found: Counter[str] = Counter()
 
-    for first, last in batches(page_count, settings.layout_batch_pages):
-        regions: dict[str, list[dict]] = {kind: [] for kind in KINDS}
-        if _convert_batch(converter, path, first, last, regions, seq) == "failed":
+    for first, last in source.batches(settings.layout_batch_pages):
+        regions: defaultdict[str, list[dict]] = defaultdict(list)
+        for kind in kinds:
+            regions[kind] = []
+        if _convert_batch(converter, source, first, last, regions, seq, classify) == "failed":
             failed += 1
+            if on_failed is not None:
+                on_failed(first, last)
         found.update({kind: len(items) for kind, items in regions.items()})
-        yield first, last, regions
+        yield first, last, dict(regions)
 
     annotate(
         **{
             "evilflowers.layout.failed_batches": failed,
-            **{f"evilflowers.layout.{kind}s": found[kind] for kind in KINDS},
+            **{f"evilflowers.layout.{kind}s": found[kind] for kind in (kinds or sorted(found))},
         }
     )
 
 
 def find_regions(path: str, page_count: int, settings: Settings | None = None) -> dict[str, list[dict]]:
-    """Every figure, table and equation of the document, by kind, in reading order (see ``layout_batches``)."""
+    """Every figure, table and equation of the PDF, by kind, in reading order (see ``layout_batches``)."""
     regions: dict[str, list[dict]] = {kind: [] for kind in KINDS}
-    for _first, _last, batch in layout_batches(path, page_count, settings):
+    for _first, _last, batch in layout_batches(PdfSource(path, page_count), settings):
         for kind in KINDS:
             regions[kind].extend(batch[kind])
     return regions
@@ -145,11 +252,12 @@ def find_regions(path: str, page_count: int, settings: Settings | None = None) -
 
 def _convert_batch(
     converter: Any,
-    path: str,
+    source: PageSource,
     first: int,
     last: int,
-    regions: dict[str, list[dict]],
+    regions: defaultdict[str, list[dict]],
     seq: defaultdict[tuple[str, int], int],
+    classify: Classify,
 ) -> str:
     """Convert pages ``first``-``last`` and collect their regions; returns ``ok`` or ``failed``."""
     started = time.perf_counter()
@@ -158,9 +266,9 @@ def _convert_batch(
         "analyzer.layout.batch", **{"evilflowers.layout.first_page": first, "evilflowers.layout.last_page": last}
     ):
         try:
-            result = converter.convert(path, page_range=(first, last), raises_on_error=False)
+            result = source.convert(converter, first, last)
         except Exception as error:
-            logger.exception("Layout failed on pages %s-%s of %s", first, last, path)
+            logger.exception("Layout failed on pages %s-%s of %s", first, last, source)
             fail(error)
             outcome = "failed"
         else:
@@ -168,19 +276,25 @@ def _convert_batch(
             status = getattr(result, "status", None)
             status = str(getattr(status, "value", status or "success"))
             if status == "failure":
-                logger.warning("Layout failed on pages %s-%s of %s: %s", first, last, path, result.errors)
+                logger.warning("Layout failed on pages %s-%s of %s: %s", first, last, source, result.errors)
                 outcome = "failed"
-            found = _collect(result.document, regions, seq)
+            found = _collect(result.document, regions, seq, classify, lambda page_no: source.page(first, page_no))
             annotate(**{"evilflowers.layout.status": status, "evilflowers.layout.regions": found})
     metrics.record_layout_batch(last - first + 1, time.perf_counter() - started, outcome)
     return outcome
 
 
-def _collect(document: Any, regions: dict[str, list[dict]], seq: defaultdict[tuple[str, int], int]) -> int:
+def _collect(
+    document: Any,
+    regions: defaultdict[str, list[dict]],
+    seq: defaultdict[tuple[str, int], int],
+    classify: Classify,
+    source_page: Callable[[int], int],
+) -> int:
     """Append the regions of one converted batch; returns how many were found."""
     found = 0
     for item, _level in document.iterate_items():
-        kind = _kind(item)
+        kind = classify(item)
         if kind is None:
             continue
         caption = _caption(item, kind, document)
@@ -189,10 +303,11 @@ def _collect(document: Any, regions: dict[str, list[dict]], seq: defaultdict[tup
             if page is None or not page.size.width or not page.size.height:
                 continue
             box = prov.bbox.to_top_left_origin(page_height=page.size.height)
-            key = (kind, prov.page_no)
+            number = source_page(prov.page_no)
+            key = (kind, number)
             regions[kind].append(
                 {
-                    "page": prov.page_no,
+                    "page": number,
                     "seq": seq[key],
                     "bbox": fractions(box.l, box.t, box.r, box.b, page.size.width, page.size.height),
                     "caption": caption,

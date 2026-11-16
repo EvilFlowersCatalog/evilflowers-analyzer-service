@@ -17,6 +17,13 @@ results of a pass that a later one superseded.
 A run never hangs on the analyzer: every way it can stop reports a failed job, except a 409 (``RunNotRunning``),
 which means the catalog no longer wants results. After ``EXTRACT_MAX_PASSES`` deliveries of the same message (#3) the
 analyzer gives up and fails the run instead of starting it again.
+
+**Step re-run** (#7, EvilFlowersCatalog#183). A ``steps`` kwarg (``["paragraphs", "tables"]``) re-runs only those
+steps of a failed run. The step ``/start`` declares only their jobs (named by the current batching) and the catalog
+resets them under the run's lock; the other steps stay ``done``. Only the named steps are dispatched, and the layout
+pass runs only when a region step is named. Until that ``/start`` succeeds the analyzer reports nothing: the run is
+still the failed one, and a report without an attempt would fail a run the catalog may have moved on. A 409
+(``not_running``, ``steps_refused``) is a skip, as for a full pass.
 """
 
 import logging
@@ -37,6 +44,7 @@ from evilflowers_worker.contract import (
     RegionsJob,
     Route,
     StartRun,
+    Step,
     batch_job,
 )
 from evilflowers_worker.deliveries import capped
@@ -84,18 +92,26 @@ def region_jobs(settings: Settings) -> dict[str, Job]:
     }
 
 
-def declared_jobs(settings: Settings, page_count: int | None = None) -> list[str]:
+def selected_region_jobs(settings: Settings, steps: Iterable[str] = ()) -> dict[str, Job]:
+    """``region_jobs`` limited to the named ``steps`` (by job name: ``figures``); every one when none are named."""
+    named = set(steps)
+    return {kind: job for kind, job in region_jobs(settings).items() if not named or job.name in named}
+
+
+def declared_jobs(settings: Settings, page_count: int | None = None, steps: Iterable[str] = ()) -> list[str]:
     """What ``/start`` declares; the run finishes when every one of them has reported.
 
     Per batch, every batch of every kind is a job, empty ones included: the batches are known from the page count
-    before layout starts.
+    before layout starts. With ``steps`` (a step re-run, #7) only the jobs of those steps, by the current batching.
     """
-    jobs = region_jobs(settings).values()
+    named = set(steps)
+    paragraphs = [paragraphs_job(settings).name] if not named or "paragraphs" in named else []
+    jobs = selected_region_jobs(settings, named).values()
     if not settings.dispatch_per_batch:
-        return [paragraphs_job(settings).name] + [job.name for job in jobs]
+        return paragraphs + [job.name for job in jobs]
     ranges = layout.batches(page_count or 0, settings.layout_batch_pages)
     batch_jobs = [batch_job(job.name, first, last) for first, last in ranges for job in jobs]
-    return [paragraphs_job(settings).name, *batch_jobs]
+    return [*paragraphs, *batch_jobs]
 
 
 class Extraction:
@@ -114,13 +130,22 @@ class Extraction:
         self.publisher = publisher
         self.delivery = delivery
         self.catalog = catalog or CatalogClient(request.run_id, settings=self.settings)
-        self.layout_batches = layout_batches or (lambda path, pages: layout.layout_batches(path, pages, self.settings))
+        self.layout_batches = layout_batches or (
+            lambda path, pages: layout.layout_batches(layout.PdfSource(path, pages), self.settings)
+        )
         self.attempt: int | None = None
         self.outline = outline.Outline("none")
+        #: The steps of a step re-run (#7), sorted; empty for a full pass.
+        self.steps: list[Step] = sorted(set(request.steps))
 
     @property
     def run_id(self) -> str:
         return self.request.run_id
+
+    @property
+    def region_jobs(self) -> dict[str, Job]:
+        """The region jobs of this pass: every kind, or only the named ones of a step re-run."""
+        return selected_region_jobs(self.settings, self.steps)
 
     @property
     def path(self) -> str:
@@ -134,6 +159,7 @@ class Extraction:
             source=self.request.source,
             extract_pass=self.delivery,
             delivery=self.delivery,
+            steps=",".join(self.steps) or None,
         ):
             outcome, stage = self._run()
         metrics.record_run(outcome, stage)
@@ -171,8 +197,9 @@ class Extraction:
             start = StartRun(
                 page_count=len(page_sizes),
                 page_sizes=page_sizes,
-                jobs=declared_jobs(self.settings, len(page_sizes)),
+                jobs=declared_jobs(self.settings, len(page_sizes), self.steps),
                 provenance=self._provenance(),
+                steps=self.steps or None,
             )
             with span("analyzer.catalog.start", **{"evilflowers.document.pages": len(page_sizes)}):
                 self.attempt = self.catalog.start(start).attempt
@@ -188,11 +215,16 @@ class Extraction:
             return "failed", "start"
 
         with bind(attempt=self.attempt):
-            paragraphs = paragraphs_job(self.settings)
-            # The headings the paragraphs fall under (#5). When present (even `[]`) it is authoritative; left out
-            # when the analyzer could not read the outline, so text-service reads the bookmarks itself.
-            entries = self.outline.entries if self.outline.source != "failed" else None
-            self.publisher.publish(paragraphs.route, ParagraphsJob(**self._common(), outline=entries))
+            if not self.steps or "paragraphs" in self.steps:
+                paragraphs = paragraphs_job(self.settings)
+                # The headings the paragraphs fall under (#5). When present (even `[]`) it is authoritative; left out
+                # when the analyzer could not read the outline, so text-service reads the bookmarks itself.
+                entries = self.outline.entries if self.outline.source != "failed" else None
+                self.publisher.publish(paragraphs.route, ParagraphsJob(**self._common(), outline=entries))
+
+            if not self.region_jobs:
+                # A step re-run of paragraphs alone: no layout pass, Docling is never loaded.
+                return "dispatched", "dispatch"
 
             with span("analyzer.layout", **{"evilflowers.document.pages": len(page_sizes)}):
                 if self.settings.dispatch_per_batch:
@@ -200,7 +232,7 @@ class Extraction:
                 return self._per_book(len(page_sizes))
 
     def _per_book(self, page_count: int) -> tuple[Outcome, str]:
-        jobs = region_jobs(self.settings)
+        jobs = self.region_jobs
         regions: dict[str, list[dict[str, Any]]] = {kind: [] for kind in jobs}
         try:
             for _first, _last, batch in self.layout_batches(self.path, page_count):
@@ -220,7 +252,7 @@ class Extraction:
         return "dispatched", "dispatch"
 
     def _per_batch(self, page_count: int) -> tuple[Outcome, str]:
-        jobs = region_jobs(self.settings)
+        jobs = self.region_jobs
         pending = list(layout.batches(page_count, self.settings.layout_batch_pages))
         try:
             for first, last, batch in self.layout_batches(self.path, page_count):
@@ -292,7 +324,14 @@ class Extraction:
         }
 
     def _report_failed(self, names: Sequence[str], error: str) -> None:
-        """Best effort: the failure is already logged and on the span, a second one must not hide it."""
+        """Best effort: the failure is already logged and on the span, a second one must not hide it.
+
+        A step re-run reports nothing before its ``/start`` succeeded (#7): without an attempt the report could fail a
+        run the catalog has since moved on, and the run it would land on is the failed one anyway.
+        """
+        if self.steps and self.attempt is None:
+            logger.error("Run %s: step re-run %s stopped before its start; nothing reported", self.run_id, self.steps)
+            return
         report = JobReport(status="failed", error=error)
         for name in names:
             try:

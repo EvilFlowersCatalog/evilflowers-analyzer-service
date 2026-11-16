@@ -8,8 +8,12 @@ was cut short is delivered again. The catalog's ``/start`` then begins a new att
 earlier pass stored; the tasks of that pass carry its ``attempt`` and are refused from then on
 (EvilFlowersCatalog#140). Each delivery is counted (``runtime.delivery``), and after ``EXTRACT_MAX_PASSES`` the run is
 failed instead of started again (#3). A message the analyzer cannot read is reported failed, never retried.
+
+``steps`` (#7): re-run only those steps of a failed run (``ExtractRequest.steps``). A step re-run reports
+nothing before its ``/start`` succeeded, an unreadable message included.
 """
 
+import logging
 from typing import Any, cast
 
 from celery import Task, shared_task
@@ -26,6 +30,8 @@ from evilflowers_worker.contract import ExtractRequest
 from evilflowers_worker.jobs import report_invalid_message
 from evilflowers_worker.runtime import JOB_TASK_OPTIONS, CeleryPublisher, runtime
 
+logger = logging.getLogger(__name__)
+
 
 @shared_task(name=ExtractRequest.TASK, bind=True, **JOB_TASK_OPTIONS)
 def extract(
@@ -35,22 +41,28 @@ def extract(
     output_dir: str,
     acquisition_id: str | None = None,
     pipeline_version: int | None = None,
+    steps: list[str] | None = None,
     **_: Any,
 ) -> Outcome:
     """Open the PDF, start the run, send paragraphs to text at once, then the layout regions by kind."""
     current = runtime()
     settings = cast(Settings, current.settings)
-    kwargs = {
+    kwargs: dict[str, Any] = {
         "run_id": run_id,
         "source": source,
         "output_dir": output_dir,
         "acquisition_id": acquisition_id,
         "pipeline_version": pipeline_version,
+        "steps": steps or [],
     }
     try:
         request = ExtractRequest.model_validate(kwargs)
     except ValidationError as error:
         metrics.record_run("failed", "input")
+        if steps:
+            # A step re-run reports nothing before its /start (#7): the run is still the failed one.
+            logger.error("Invalid step re-run message for run %s: %s", run_id, error)
+            return "failed"
         return report_invalid_message(kwargs, error, job=ANALYZER_JOB, settings=settings)
     return Extraction(
         request,

@@ -17,11 +17,23 @@ The analyzer itself is only its domain code (layout, outline, the coordinator in
 
 ## Tasks
 
-The task name, queue and argument shape are a contract with the catalog (`tests/test_worker.py` guards it).
+The task names, queues and argument shapes are contracts (`tests/test_worker.py` and `tests/test_standalone.py`
+guard them).
 
 | Task | Queue | Sent by | Kwargs |
 |---|---|---|---|
-| `evilflowers_analyzer.extract` | `evilflowers_analyzer` | catalog (`apps/extraction/services.py`) | `run_id`, `source`, `output_dir`, `acquisition_id` (logged), `pipeline_version` (logged); unknown kwargs are ignored |
+| `evilflowers_analyzer.extract` | `evilflowers_analyzer` | catalog (`apps/extraction/services.py`) | `run_id`, `source`, `output_dir`, `acquisition_id` (logged), `pipeline_version` (logged), `steps` (a step re-run, #7); unknown kwargs are ignored |
+| `evilflowers_analyzer.standalone.layout` | `evilflowers_analyzer.standalone`, `….standalone.interactive` | books digitalizer (#8) | `run_id`, `job`, `token`, `output_dir`, `outcome`, `leaves` (`[{leaf, image, mask}]`); see `tasks/standalone.py` |
+
+**Step re-run** (#7). With `steps` (a sorted subset of `equations`, `figures`, `paragraphs`, `tables`) the analyzer
+re-runs only those steps of a failed run. Its `/start` carries `steps` and only their jobs, named by the current
+batching. It dispatches only those steps, and runs the layout pass only when a region step is named. Until that
+`/start` succeeds it reports nothing, and a 409 (`not_running`, `steps_refused`) is a skip.
+
+**Standalone layout** (#8). The same Docling pass, on the digitalizer's leaf images instead of a PDF. It writes
+`regions.json` and then an outcome file into the job's directory, and posts nothing to the catalog. It runs in a
+second Deployment of the same image with `ANALYZER_STANDALONE=1`, on the digitalizer's Redis db, with no catalog
+key. On an image without OCR, Docling keeps only pictures, tables and formulas, so captions are empty.
 
 A run goes like this (`src/evilflowers_analyzer/pipeline.py`):
 
@@ -160,9 +172,11 @@ defaults and meaning. The ones a deployment sets:
   cancel may take before the worker requeues the book itself
 - `EXTRACT_MAX_PASSES` (5), deliveries of one run before it is failed
 - `ANALYZER_QUEUE`, `TEXT_TABLES_QUEUE`, `TEXT_PARAGRAPHS_QUEUE`, `IMAGE_QUEUE`, `EQUATION_QUEUE`, only when a queue
-  is renamed. The image's `CMD` passes `--queues=evilflowers_analyzer`, so renaming the consumed queue also needs a
-  changed command. The old `TEXT_QUEUE` is ignored, so a manifest that still sets it cannot send the text jobs back to
-  the legacy queue.
+  is renamed. The image's `CMD` names no queue, so the worker consumes the one its settings name. The old
+  `TEXT_QUEUE` is ignored, so a manifest that still sets it cannot send the text jobs back to the legacy queue.
+- `ANALYZER_STANDALONE` (off): consume `evilflowers_analyzer.standalone.interactive` and
+  `evilflowers_analyzer.standalone` instead of `ANALYZER_QUEUE` (the digitalizer's Deployment, #8). Its interactive
+  replica passes `-Q evilflowers_analyzer.standalone.interactive`. Such a Deployment needs no `CATALOG_API_*`.
 - `IMAGE_TAG`, built in by CI
 
 ## Observability

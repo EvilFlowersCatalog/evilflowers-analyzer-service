@@ -11,9 +11,9 @@ from typing import Any
 from evilflowers_analyzer import layout
 
 
-def _layout_batches(path: str, page_count: int, settings: Any = None) -> Iterator[layout.Batch]:
+def _layout_batches(source: layout.PageSource, settings: Any = None, **_: Any) -> Iterator[layout.Batch]:
     size = settings.layout_batch_pages if settings else 16
-    for first, last in layout.batches(page_count, size):
+    for first, last in source.batches(size):
         figure = {"page": first, "seq": 0, "bbox": {"x0": 0.1, "y0": 0.1, "x1": 0.5, "y1": 0.5}, "caption": "Fig."}
         yield first, last, {"figure": [figure], "table": [], "equation": []}
 

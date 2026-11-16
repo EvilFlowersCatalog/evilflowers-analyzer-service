@@ -96,10 +96,81 @@ def test_layout_batches_yields_every_batch_as_it_is_converted_a_bad_one_empty(se
     monkeypatch.setattr(layout, "_kind", lambda item: item.kind)
     settings = settings.model_copy(update={"layout_batch_pages": 2})
 
-    batches = layout.layout_batches("/book.pdf", 4, settings)
+    batches = layout.layout_batches(layout.PdfSource("/book.pdf", 4), settings)
     first, last, regions = next(batches)
     # Yielded before the next batch is even converted: the caller can send it at once.
     assert (first, last, converter.ranges) == (1, 2, [(1, 2)])
     assert [len(regions[kind]) for kind in layout.KINDS] == [3, 0, 1]
 
     assert list(batches) == [(3, 4, {"figure": [], "table": [], "equation": []})]
+
+
+# -- page images (#8) ---------------------------------------------------------------------------
+
+
+class FakeImageConverter:
+    """Each image is a one-page document with one picture and one formula; ``bad.png`` raises."""
+
+    def __init__(self):
+        self.calls = []
+
+    def convert(self, path, raises_on_error):
+        self.calls.append(path)
+        if path == "bad.png":
+            raise RuntimeError("cannot read image")
+        size = SimpleNamespace(width=1000, height=2000)
+        items = [
+            fake_item("picture", 1, box(100, 200, 500, 1000), "Obr. 3"),
+            fake_item("formula", 1, box(0, 1800, 1000, 1900)),
+        ]
+        document = SimpleNamespace(
+            pages={1: SimpleNamespace(size=size)}, iterate_items=lambda: [(item, 0) for item in items]
+        )
+        return SimpleNamespace(document=document)
+
+
+def test_image_source_converts_one_image_per_batch_and_maps_its_page(settings, monkeypatch):
+    converter = FakeImageConverter()
+    monkeypatch.setattr(layout, "_converter", converter)
+    failed = []
+
+    batches = list(
+        layout.layout_batches(
+            layout.ImageSource(["a.png", "bad.png", "c.png"]),
+            settings,
+            classify=lambda item: item.kind,
+            kinds=(),
+            on_failed=lambda first, last: failed.append((first, last)),
+        )
+    )
+
+    assert converter.calls == ["a.png", "bad.png", "c.png"]
+    assert [(first, last) for first, last, _regions in batches] == [(1, 1), (2, 2), (3, 3)]
+    assert failed == [(2, 2)]
+    assert batches[1][2] == {}
+    picture = batches[2][2]["picture"]
+    bbox = {"x0": 0.1, "y0": 0.1, "x1": 0.5, "y1": 0.5}
+    assert picture == [{"page": 3, "seq": 0, "bbox": bbox, "caption": "Obr. 3"}]
+    assert batches[2][2]["formula"][0]["caption"] is None
+
+
+def test_docling_labels_are_kept_as_they_are_and_groups_skipped():
+    from docling_core.types.doc import DocItemLabel, GroupItem, PictureItem, TextItem
+
+    def item(cls, label):
+        return cls.model_construct(label=label, self_ref="#/x", prov=[])
+
+    assert layout.label(item(PictureItem, DocItemLabel.PICTURE)) == "picture"
+    assert layout.label(item(TextItem, DocItemLabel.SECTION_HEADER)) == "section_header"
+    assert layout.label(GroupItem.model_construct(self_ref="#/g")) is None
+
+
+def test_one_converter_reads_pdfs_and_images(monkeypatch):
+    """Both formats share the options, so Docling builds one pipeline (one layout model) for both."""
+    from docling.datamodel.base_models import InputFormat
+
+    converter = layout._build_converter(2)
+    pdf = converter.format_to_options[InputFormat.PDF]
+    image = converter.format_to_options[InputFormat.IMAGE]
+    assert pdf.pipeline_options is image.pipeline_options
+    assert pdf.pipeline_cls is image.pipeline_cls

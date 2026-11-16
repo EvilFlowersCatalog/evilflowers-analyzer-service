@@ -1,0 +1,39 @@
+@startuml step-rerun
+' Step re-run of a failed extraction run (#7, EvilFlowersCatalog#183).
+title Step re-run: extract(steps=[...]) -> step /start -> only the named steps
+
+participant "catalog" as catalog
+queue "evilflowers_analyzer" as q
+participant "analyzer\nextract" as analyzer
+participant "Docling layout" as layout
+queue "service queues\n(text, image, equation)" as services
+
+catalog -> q : extract(run_id, source, output_dir, ..., steps=["paragraphs","tables"])
+q -> analyzer : deliver (acks late)
+analyzer -> analyzer : open PDF: page sizes, outline
+note right of analyzer
+  Before a successful step /start the analyzer reports nothing:
+  no "analyzer: failed" (it carries no attempt and would
+  fail a run the catalog has moved on). Delivery cap, open
+  failure, start failure and invalid message: log + metric only.
+end note
+analyzer -> catalog : POST /start {page_count, page_sizes, provenance,\n steps, jobs: named steps only, current batching}
+alt 409 not_running / steps_refused
+  catalog --> analyzer : 409
+  analyzer -> analyzer : skip (not_running)
+else 200
+  catalog --> analyzer : {attempt: N}
+  opt "paragraphs" named
+    analyzer -> services : ParagraphsJob(outline, attempt=N)
+  end
+  opt any of figures / equations / tables named
+    analyzer -> layout : layout batches (no layout is stored)
+    layout --> analyzer : regions by kind
+    analyzer -> services : RegionsJob of the named kinds only (attempt=N)
+    note right of analyzer
+      On layout failure: report the declared jobs of the
+      named kinds failed, with ?attempt=N.
+    end note
+  end
+end
+@enduml

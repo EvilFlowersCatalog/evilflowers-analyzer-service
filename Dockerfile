@@ -55,5 +55,7 @@ VOLUME ["/models"]
 
 # Prefork with one child: the parent stays responsive to Flower while the child runs a book, and
 # telemetry and profiling start in the child (worker_process_init).
-CMD ["celery", "-A", "evilflowers_analyzer.worker", "worker", "--loglevel=INFO", "-E", "--concurrency=1", \
-     "--queues=evilflowers_analyzer"]
+# No --queues: the app consumes what its settings name (ANALYZER_QUEUE, or the two standalone queues with
+# ANALYZER_STANDALONE=1, #8). A Deployment that wants a subset passes `-Q`, e.g. the digitalizer's interactive replica:
+# `-Q evilflowers_analyzer.standalone.interactive`.
+CMD ["celery", "-A", "evilflowers_analyzer.worker", "worker", "--loglevel=INFO", "-E", "--concurrency=1"]

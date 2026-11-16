@@ -1,0 +1,29 @@
+@startuml standalone-layout
+' Standalone layout task for the books digitalizer (#8, evilflowers-books-digitalizer#1).
+title evilflowers_analyzer.standalone.layout: Docling layout on leaf images, no catalog
+
+participant "digitalizer\norchestrator" as orchestrator
+queue "evilflowers_analyzer.standalone\n(.interactive)\nRedis db 8" as q
+participant "analyzer\nstandalone.layout" as task
+participant "Docling layout\n(shared converter)" as layout
+database "STORAGE_PATH" as storage
+
+orchestrator -> q : send_task(kwargs={run_id, job, token, output_dir, outcome,\n leaves:[{leaf, image, mask}]}, link, link_error)
+q -> task : deliver (acks late, delivery cap)
+loop every leaf
+  task -> storage : read leaf image
+  opt mask present
+    task -> task : paint the mask white on a private temp copy\n(the image itself is never changed)
+  end
+  task -> layout : convert (InputFormat.IMAGE)
+  layout --> task : pictures, tables, formulas (+ captions)
+end
+task -> storage : output_dir/regions.json\n[{leaf, kind, seq, bbox [x0,y0,x1,y1] fractions, caption}]
+task -> storage : outcome (last, atomic)\n{run_id, token, status, error, regions, leaves}
+task --> orchestrator : link: {job, regions: n}
+note over task
+  On failure: write outcome status=failed with error, then raise
+  (link_error fires). Never on a deliberate requeue (SIGTERM).
+  Nothing is posted to the catalog.
+end note
+@enduml
